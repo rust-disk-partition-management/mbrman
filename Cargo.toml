@@ -1,0 +1,14 @@
+[package]
+name = "mbrman"
+version = "0.1.0"
+authors = ["Cecile Tonglet <cecile.tonglet@cecton.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bitvec = "0.13"
+bincode = "1.0.1"
+serde_derive = "1.0.83"
+serde = "1.0.83"
+err-derive = "0.1.5"
