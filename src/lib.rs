@@ -49,7 +49,7 @@ impl CHS {
     /// ### Remark
     ///
     /// This is what you need on recent hardware because CHS is never used.
-    pub fn new() -> CHS {
+    pub fn empty() -> CHS {
         CHS {
             cylinder: 0,
             head: 0,
@@ -138,6 +138,24 @@ impl CHS {
         // NOTE: In CHS addressing the sector numbers always start at 1, there is no sector 0
         //       https://en.wikipedia.org/wiki/Cylinder-head-sector
         c * (heads * sectors) + h * sectors + s - 1
+    }
+
+    /// Check if the CHS address is empty
+    ///
+    /// ### Remark
+    ///
+    /// This function does not check if the CHS address is withing range of
+    /// possible values for a provided hard disk.
+    pub fn is_empty(&self) -> bool {
+        self.cylinder == 0 && self.head == 0 && self.sector == 0
+    }
+
+    /// Check if the CHS address is valid and within range of the possible
+    /// values for the hard disk geometry provided in argument.
+    pub fn is_valid(&self, cylinders: u16, heads: u8, sectors: u8) -> bool {
+        // NOTE: In CHS addressing the sector numbers always start at 1, there is no sector 0
+        //       https://en.wikipedia.org/wiki/Cylinder-head-sector
+        self.sector > 0 && self.sector <= sectors && self.head < heads && self.cylinder < cylinders
     }
 }
 
