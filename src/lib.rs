@@ -1,5 +1,7 @@
 #[macro_use]
 extern crate serde_derive;
+#[macro_use]
+extern crate err_derive;
 
 use bitvec::prelude::*;
 use serde::de::{Deserialize, Deserializer, SeqAccess, Visitor};
@@ -7,8 +9,9 @@ use serde::ser::{Serialize, SerializeTuple, Serializer};
 use std::convert::TryFrom;
 use std::iter::repeat;
 
+/// An MBR partition entry
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Partition {
+pub struct MBRPartitionEntry {
     boot: bool,
     first_chs: CHS,
     sys: u8,
@@ -17,6 +20,7 @@ pub struct Partition {
     ending_lba: u32,
 }
 
+/// A CHS address (cylinder/head/sector)
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct CHS {
     cylinder: u16,
@@ -24,12 +28,27 @@ pub struct CHS {
     sector: u8,
 }
 
+/// An error
+#[derive(Debug, Error)]
 pub enum Error {
+    /// The CHS address requested cannot be represented in CHS
+    ///
+    /// ### Remark
+    ///
+    /// There is a hard limit around 8GB for CHS addressing.
+    #[error(display = "exceeded the maximum limit of CHS")]
     LBAExceedsMaximumCHS,
+    /// The CHS address requested exceeds the number of cylinders in the disk
+    #[error(display = "exceeded the maximum number of cylinders on disk")]
     LBAExceedsMaximumCylinders,
 }
 
 impl CHS {
+    /// Creates an empty CHS addressing (0/0/0).
+    ///
+    /// ### Remark
+    ///
+    /// This is what you need on recent hardware because CHS is never used.
     pub fn new() -> CHS {
         CHS {
             cylinder: 0,
@@ -38,14 +57,24 @@ impl CHS {
         }
     }
 
-    pub fn from_lba(lba: u32, cylinders: u16, heads: u8, sectors: u8) -> Result<CHS, Error> {
+    /// Creates a CHS address calculated from the number of cylinders, heads
+    /// and sectors per track of the hard disk.
+    ///
+    /// ### Remarks
+    ///
+    ///  *  You probably don't need to do this at all! This is only useful if you
+    ///     intend to use partitions that use the CHS addressing. Check the column
+    ///     "Access" of [this table on Wikipedia](https://en.wikipedia.org/wiki/Partition_type).
+    ///  *  On old systems, partitions must be aligned on cylinders.
+    pub fn from_lba_exact(lba: u32, cylinders: u16, heads: u8, sectors: u8) -> Result<CHS, Error> {
         // NOTE: code inspired from libfdisk (long2chs)
         let cylinders = u32::from(cylinders);
         let heads = u32::from(heads);
         let sectors = u32::from(sectors);
+        let cylinder_size = heads * sectors;
 
-        let cylinder = lba / (heads * sectors);
-        let rem = lba % (heads * sectors);
+        let cylinder = lba / cylinder_size;
+        let rem = lba % cylinder_size;
         let head = rem / sectors;
         let sector = rem % sectors + 1;
 
@@ -61,6 +90,38 @@ impl CHS {
             cylinder: u16::try_from(cylinder).unwrap(),
             head: u8::try_from(head).unwrap(),
             sector: u8::try_from(sector).unwrap(),
+        })
+    }
+
+    /// Creates a CHS address, aligned to the nearest cylinder. The cylinder
+    /// chosen will always be the exact cylinder (if the LBA is exactly at the
+    /// beginning of a cylinder); or the next cylinder. But it will never
+    /// choose the previous cylinder.
+    pub fn from_lba_aligned(
+        lba: u32,
+        cylinders: u16,
+        heads: u8,
+        sectors: u8,
+    ) -> Result<CHS, Error> {
+        let cylinders = u32::from(cylinders);
+        let heads = u32::from(heads);
+        let sectors = u32::from(sectors);
+        let cylinder_size = heads * sectors;
+
+        let cylinder = ((lba - 1) / cylinder_size) + 1;
+
+        if cylinder > 1023 {
+            return Err(Error::LBAExceedsMaximumCHS);
+        }
+
+        if cylinder > cylinders {
+            return Err(Error::LBAExceedsMaximumCylinders);
+        }
+
+        Ok(CHS {
+            cylinder: u16::try_from(cylinder).unwrap(),
+            head: 0,
+            sector: 1,
         })
     }
 }
@@ -131,14 +192,10 @@ impl Serialize for CHS {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
 
     #[test]
     fn deserizlize_maximum_chs_value() {
-        let data = &[0xff, 0xff, 0xff, 0xff];
-        let mut cur = Cursor::new(data);
-        let chs: CHS = bincode::deserialize_from(&mut cur).unwrap();
-        assert_eq!(cur.position(), 3);
+        let chs: CHS = bincode::deserialize(&[0xff, 0xff, 0xff]).unwrap();
         assert_eq!(
             chs,
             CHS {
@@ -162,9 +219,7 @@ mod tests {
 
     #[test]
     fn serialize_and_deserizlize_some_chs_value() {
-        let data = &[0xaa, 0xaa, 0xaa];
-        let mut cur = Cursor::new(data);
-        let chs: CHS = bincode::deserialize_from(&mut cur).unwrap();
+        let chs: CHS = bincode::deserialize(&[0xaa, 0xaa, 0xaa]).unwrap();
         assert_eq!(
             chs,
             CHS {
@@ -175,5 +230,20 @@ mod tests {
         );
         let out = bincode::serialize(&chs).unwrap();
         assert_eq!(out, &[0xaa, 0xaa, 0xaa]);
+    }
+
+    #[test]
+    fn align_chs_to_cylinder() {
+        fn lba2c(lba: u32) -> u16 {
+            let chs = CHS::from_lba_aligned(lba, 100, 2, 2).unwrap();
+
+            assert_eq!(chs.head, 0);
+            assert_eq!(chs.sector, 1);
+
+            chs.cylinder
+        }
+
+        assert_eq!(lba2c(12), 3);
+        assert_eq!(lba2c(10), 3);
     }
 }
