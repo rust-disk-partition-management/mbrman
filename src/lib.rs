@@ -12,7 +12,6 @@ use std::iter::repeat;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MBRHeader {
-    pub bootstrap_code: BootstrapCode440,
     pub disk_signature: [u8; 4],
     pub copy_protected: [u8; 2],
     pub partition_1: MBRPartitionEntry,
@@ -57,76 +56,6 @@ impl std::ops::IndexMut<usize> for MBRHeader {
         }
     }
 }
-
-macro_rules! bytes_blob {
-    ($name:ident, $n:expr, $visitor:ident) => {
-        #[derive(Clone)]
-        pub struct $name(pub [u8; $n]);
-
-        struct $visitor;
-
-        impl<'de> Visitor<'de> for $visitor {
-            type Value = $name;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(formatter, "a sequence of {} bytes", $n)
-            }
-
-            fn visit_seq<A>(self, mut seq: A) -> std::result::Result<$name, A::Error>
-            where
-                A: SeqAccess<'de>,
-            {
-                let mut bytes = [0_u8; $n];
-                let mut i = 0;
-                loop {
-                    match seq.next_element()? {
-                        Some(x) => bytes[i] = x,
-                        None => break,
-                    }
-                    i += 1;
-                }
-
-                Ok($name(bytes))
-            }
-        }
-
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                deserializer.deserialize_tuple($n, $visitor)
-            }
-        }
-
-        impl Serialize for $name {
-            fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-            where
-                S: Serializer,
-            {
-                let mut seq = serializer.serialize_tuple($n)?;
-                for x in self.0.iter() {
-                    seq.serialize_element(&x)?;
-                }
-                seq.end()
-            }
-        }
-
-        impl std::fmt::Debug for $name {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-                for i in 0..($n - 1) {
-                    write!(f, "{:02} ", self.0[i])?;
-                }
-                write!(f, "{:02}", self.0[$n - 1])?;
-
-                Ok(())
-            }
-        }
-    };
-}
-
-bytes_blob!(BootstrapCode440, 440, BootstrapCode440Visitor);
-bytes_blob!(BootstrapCode446, 446, BootstrapCode446Visitor);
 
 macro_rules! signature {
     ($name:ident, $n:expr, $bytes:expr, $visitor:ident) => {
@@ -207,8 +136,12 @@ pub struct MBRPartitionEntry {
 }
 
 impl MBRPartitionEntry {
-    pub fn is_empty(&self) -> bool {
-        self.sys == 0
+    pub fn is_used(&self) -> bool {
+        self.sys > 0
+    }
+
+    pub fn is_unused(&self) -> bool {
+        !self.is_used()
     }
 }
 
