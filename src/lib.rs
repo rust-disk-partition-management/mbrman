@@ -118,11 +118,26 @@ impl CHS {
             return Err(Error::LBAExceedsMaximumCylinders);
         }
 
+        // NOTE: In CHS addressing the sector numbers always start at 1, there is no sector 0
+        //       https://en.wikipedia.org/wiki/Cylinder-head-sector
         Ok(CHS {
             cylinder: u16::try_from(cylinder).unwrap(),
             head: 0,
             sector: 1,
         })
+    }
+
+    /// Convert a CHS address to LBA
+    pub fn to_lba(&self, heads: u8, sectors: u8) -> u32 {
+        let heads = u32::from(heads);
+        let sectors = u32::from(sectors);
+        let c = u32::from(self.cylinder);
+        let h = u32::from(self.head);
+        let s = u32::from(self.sector);
+
+        // NOTE: In CHS addressing the sector numbers always start at 1, there is no sector 0
+        //       https://en.wikipedia.org/wiki/Cylinder-head-sector
+        c * (heads * sectors) + h * sectors + s - 1
     }
 }
 
@@ -245,5 +260,20 @@ mod tests {
 
         assert_eq!(lba2c(12), 3);
         assert_eq!(lba2c(10), 3);
+    }
+
+    #[test]
+    fn convert_chs_to_lba_and_back() {
+        // NOTE: 2484/16/63 is taken from a real life example of hard disk of 1280MB
+        // LBA address 666666 is around 341MB for a sector size of 512 bytes
+        let chs = CHS::from_lba_exact(666666, 2484, 16, 63).unwrap();
+        assert_eq!(chs.to_lba(16, 63), 666666);
+
+        let chs = CHS::from_lba_aligned(666666, 2484, 16, 63).unwrap();
+        assert_eq!(chs.to_lba(16, 63), 667296);
+
+        let chs = CHS::from_lba_exact(667296, 2484, 16, 63).unwrap();
+        assert_eq!(chs.head, 0);
+        assert_eq!(chs.sector, 1);
     }
 }
