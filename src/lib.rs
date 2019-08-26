@@ -9,6 +9,89 @@ use serde::de::{Deserialize, Deserializer, SeqAccess, Visitor};
 use serde::ser::{Serialize, SerializeTuple, Serializer};
 use std::convert::TryFrom;
 use std::iter::repeat;
+use std::ops::{Index, IndexMut};
+
+pub struct MBR {
+    /// Sector size of the disk.
+    ///
+    /// You should not change this, otherwise the starting locations of your partitions will be
+    /// different in bytes.
+    pub sector_size: u64,
+    /// GPT partition header (disk GUID, first/last usable LBA, etc...)
+    pub header: MBRHeader,
+    logical_partitions: Vec<MBRPartitionEntry>,
+    /// Partitions alignment (in sectors)
+    ///
+    /// This field change the behavior of the methods `get_maximum_partition_size()`,
+    /// `find_free_sectors()`, `find_first_place()`, `find_last_place()` and `find_optimal_place()`
+    /// so they return only values aligned to the alignment.
+    ///
+    /// # Panics
+    /// The value must be greater than 0, otherwise you will encounter divisions by zero.
+    pub align: u64,
+}
+
+impl MBR {
+    /// Get an iterator over the partition entries and their index. The
+    /// index always starts at 1.
+    pub fn iter(&self) -> impl Iterator<Item = (usize, &MBRPartitionEntry)> {
+        self.header.iter().chain(
+            self.logical_partitions
+                .iter()
+                .enumerate()
+                .map(|(i, x)| (i + 5, x)),
+        )
+    }
+
+    /// Get a mutable iterator over the partition entries and their
+    /// index. The index always starts at 1.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (usize, &mut MBRPartitionEntry)> {
+        let mut partitions: Vec<_> = vec![
+            &mut self.header.partition_1,
+            &mut self.header.partition_2,
+            &mut self.header.partition_3,
+            &mut self.header.partition_4,
+        ];
+        partitions.extend(self.logical_partitions.iter_mut());
+        partitions.into_iter().enumerate().map(|(i, x)| (i + 1, x))
+    }
+
+    pub fn get(&self, i: usize) -> Option<&MBRPartitionEntry> {
+        match i {
+            0 => None,
+            1 => Some(&self.header.partition_1),
+            2 => Some(&self.header.partition_2),
+            3 => Some(&self.header.partition_3),
+            4 => Some(&self.header.partition_4),
+            i => self.logical_partitions.get(i - 5),
+        }
+    }
+
+    pub fn get_mut(&mut self, i: usize) -> Option<&mut MBRPartitionEntry> {
+        match i {
+            0 => None,
+            1 => Some(&mut self.header.partition_1),
+            2 => Some(&mut self.header.partition_2),
+            3 => Some(&mut self.header.partition_3),
+            4 => Some(&mut self.header.partition_4),
+            i => self.logical_partitions.get_mut(i - 5),
+        }
+    }
+}
+
+impl Index<usize> for MBR {
+    type Output = MBRPartitionEntry;
+
+    fn index(&self, i: usize) -> &Self::Output {
+        self.get(i).expect("invalid partition")
+    }
+}
+
+impl IndexMut<usize> for MBR {
+    fn index_mut(&mut self, i: usize) -> &mut Self::Output {
+        self.get_mut(i).expect("invalid partition")
+    }
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MBRHeader {
@@ -29,32 +112,95 @@ impl MBRHeader {
             _ => None,
         }
     }
+
+    pub fn get(&self, i: usize) -> Option<&MBRPartitionEntry> {
+        match i {
+            1 => Some(&self.partition_1),
+            2 => Some(&self.partition_2),
+            3 => Some(&self.partition_3),
+            4 => Some(&self.partition_4),
+            _ => None,
+        }
+    }
+
+    pub fn get_mut(&mut self, i: usize) -> Option<&mut MBRPartitionEntry> {
+        match i {
+            1 => Some(&mut self.partition_1),
+            2 => Some(&mut self.partition_2),
+            3 => Some(&mut self.partition_3),
+            4 => Some(&mut self.partition_4),
+            _ => None,
+        }
+    }
+
+    /// Get an iterator over the primary partition entries and their index. The
+    /// index always starts at 1.
+    pub fn iter(&self) -> impl Iterator<Item = (usize, &MBRPartitionEntry)> {
+        vec![
+            &self.partition_1,
+            &self.partition_2,
+            &self.partition_3,
+            &self.partition_4,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, x)| (i + 1, x))
+    }
+
+    /// Get a mutable iterator over the primary partition entries and their
+    /// index. The index always starts at 1.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (usize, &mut MBRPartitionEntry)> {
+        vec![
+            &mut self.partition_1,
+            &mut self.partition_2,
+            &mut self.partition_3,
+            &mut self.partition_4,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, x)| (i + 1, x))
+    }
+
+    fn get_extended_partition(&self) -> Option<&MBRPartitionEntry> {
+        self.iter()
+            .find(|(_, x)| x.sys == 0x05 || x.sys == 0x0f || x.sys == 0x85)
+            .map(|(_, x)| x)
+    }
 }
 
-impl std::ops::Index<usize> for MBRHeader {
+impl Index<usize> for MBRHeader {
     type Output = MBRPartitionEntry;
 
     fn index(&self, i: usize) -> &Self::Output {
-        match i {
-            1 => &self.partition_1,
-            2 => &self.partition_2,
-            3 => &self.partition_3,
-            4 => &self.partition_4,
-            _ => panic!("the partition index must be in range 1..=4"),
-        }
+        self.get(i).expect("invalid partition")
     }
 }
 
-impl std::ops::IndexMut<usize> for MBRHeader {
+impl IndexMut<usize> for MBRHeader {
     fn index_mut(&mut self, i: usize) -> &mut Self::Output {
-        match i {
-            1 => &mut self.partition_1,
-            2 => &mut self.partition_2,
-            3 => &mut self.partition_3,
-            4 => &mut self.partition_4,
-            _ => panic!("the partition index must be in range 1..=4"),
-        }
+        self.get_mut(i).expect("invalid partition")
     }
+}
+
+pub struct MBRPartitionEntryIter<'a> {
+    phantom: std::marker::PhantomData<&'a ()>,
+}
+
+impl<'a> Iterator for MBRPartitionEntryIter<'a> {
+    type Item = &'a MBRPartitionEntry;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        None
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct EBRHeader {
+    pub partition_1: MBRPartitionEntry,
+    pub partition_2: MBRPartitionEntry,
+    pub unused_partition_3: [u8; 16],
+    pub unused_partition_4: [u8; 16],
+    pub boot_signature: Signature55AA,
 }
 
 macro_rules! signature {
@@ -143,6 +289,17 @@ impl MBRPartitionEntry {
     pub fn is_unused(&self) -> bool {
         !self.is_used()
     }
+}
+
+/// An MBR partition entry
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct EBRPartitionEntry {
+    boot: bool,
+    first_chs: CHS,
+    sys: u8,
+    last_chs: CHS,
+    starting_lba: u32,
+    ending_lba: u32,
 }
 
 /// A CHS address (cylinder/head/sector)
