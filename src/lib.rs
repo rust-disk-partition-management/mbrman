@@ -17,8 +17,9 @@ const DEFAULT_ALIGN: u32 = 2048;
 const MAX_ALIGN: u32 = 16384;
 const FIRST_USABLE_LBA: u32 = 1;
 const BOOTSTRAP_CODE_SIZE: u64 = 440;
+const EBR_BOOTSTRAP_CODE_SIZE: u32 = 446;
 
-/// The result of reading, writing or managing a GPT.
+/// The result of reading, writing or managing a MBR.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// An error
@@ -40,6 +41,9 @@ pub enum Error {
     /// I/O errors.
     #[error(display = "generic I/O error")]
     Io(#[error(cause)] std::io::Error),
+    /// Inconsistent extended boot record
+    #[error(display = "inconsistent extended boot record")]
+    InconsistentEBR,
 }
 
 pub struct MBR {
@@ -88,6 +92,12 @@ impl MBR {
         partitions.into_iter().enumerate().map(|(i, x)| (i + 1, x))
     }
 
+    /// Get `Some(&MBRPartitionEntry)` if it exists, None otherwise.
+    ///
+    /// ### Remarks
+    ///
+    ///  -  The partitions start at index 1
+    ///  -  The first 4 partitions always exist
     pub fn get(&self, i: usize) -> Option<&MBRPartitionEntry> {
         match i {
             0 => None,
@@ -99,6 +109,12 @@ impl MBR {
         }
     }
 
+    /// Get `Some(&mut MBRPartitionEntry)` if it exists, None otherwise.
+    ///
+    /// ### Remarks
+    ///
+    ///  -  The partitions start at index 1
+    ///  -  The first 4 partitions always exist
     pub fn get_mut(&mut self, i: usize) -> Option<&mut MBRPartitionEntry> {
         match i {
             0 => None,
@@ -142,10 +158,16 @@ impl MBR {
             let mut ebr_lba = 0;
             loop {
                 reader.seek(SeekFrom::Start(
-                    ((extended.starting_lba + ebr_lba) * sector_size + 446) as u64,
+                    ((extended.starting_lba + ebr_lba) * sector_size + EBR_BOOTSTRAP_CODE_SIZE)
+                        as u64,
                 ))?;
                 let (p, next) = EBRHeader::read_from(&mut reader)?.unwrap();
                 logical_partitions.push(p);
+
+                if next.starting_lba > 0 && ebr_lba >= next.starting_lba {
+                    return Err(Error::InconsistentEBR);
+                }
+
                 ebr_lba = next.starting_lba;
 
                 if ebr_lba == 0 {
@@ -165,7 +187,7 @@ impl MBR {
     }
 
     fn find_alignment(header: &MBRHeader, logical_partitions: &[MBRPartitionEntry]) -> u32 {
-        let mut lbas = header
+        let lbas = header
             .iter()
             .map(|(_, x)| x)
             .chain(logical_partitions.iter())
@@ -216,6 +238,7 @@ pub struct MBRHeader {
 }
 
 impl MBRHeader {
+    /// Check if the partition table is copy-protected
     pub fn is_copy_protected(&self) -> Option<bool> {
         match self.copy_protected {
             [0x00, 0x00] => Some(false),
@@ -224,6 +247,13 @@ impl MBRHeader {
         }
     }
 
+    /// Get `Some(&MBRPartitionEntry)` if it exists, None otherwise.
+    ///
+    /// ### Remarks
+    ///
+    ///  -  The partitions start at index 1
+    ///  -  The first 4 partitions always exist
+    ///  -  This function does not return logical partitions
     pub fn get(&self, i: usize) -> Option<&MBRPartitionEntry> {
         match i {
             1 => Some(&self.partition_1),
@@ -234,6 +264,13 @@ impl MBRHeader {
         }
     }
 
+    /// Get `Some(&mut MBRPartitionEntry)` if it exists, None otherwise.
+    ///
+    /// ### Remarks
+    ///
+    ///  -  The partitions start at index 1
+    ///  -  The first 4 partitions always exist
+    ///  -  This function does not return logical partitions
     pub fn get_mut(&mut self, i: usize) -> Option<&mut MBRPartitionEntry> {
         match i {
             1 => Some(&mut self.partition_1),
@@ -302,24 +339,23 @@ impl IndexMut<usize> for MBRHeader {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct EBRHeader {
-    pub partition_1: MBRPartitionEntry,
-    pub partition_2: MBRPartitionEntry,
-    pub unused_partition_3: [u8; 16],
-    pub unused_partition_4: [u8; 16],
-    pub boot_signature: Signature55AA,
+struct EBRHeader {
+    partition_1: MBRPartitionEntry,
+    partition_2: MBRPartitionEntry,
+    unused_partition_3: [u8; 16],
+    unused_partition_4: [u8; 16],
+    boot_signature: Signature55AA,
 }
 
 impl EBRHeader {
-    /// Attempt to read a EBR (Extended Boot Record)) header from a reader.
-    pub fn read_from<R: ?Sized>(mut reader: &mut R) -> bincode::Result<EBRHeader>
+    fn read_from<R: ?Sized>(mut reader: &mut R) -> bincode::Result<EBRHeader>
     where
         R: Read,
     {
         deserialize_from(&mut reader)
     }
 
-    pub fn unwrap(self) -> (MBRPartitionEntry, MBRPartitionEntry) {
+    fn unwrap(self) -> (MBRPartitionEntry, MBRPartitionEntry) {
         (self.partition_1, self.partition_2)
     }
 }
@@ -398,12 +434,12 @@ signature!(Signature55AA, 2, &[0x55, 0xaa], Signature55AAVisitor);
 /// An MBR partition entry
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MBRPartitionEntry {
-    boot: bool,
-    first_chs: CHS,
-    sys: u8,
-    last_chs: CHS,
-    starting_lba: u32,
-    sectors: u32,
+    pub boot: bool,
+    pub first_chs: CHS,
+    pub sys: u8,
+    pub last_chs: CHS,
+    pub starting_lba: u32,
+    pub sectors: u32,
 }
 
 impl MBRPartitionEntry {
@@ -442,9 +478,9 @@ impl MBRPartitionEntry {
 /// A CHS address (cylinder/head/sector)
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct CHS {
-    cylinder: u16,
-    head: u8,
-    sector: u8,
+    pub cylinder: u16,
+    pub head: u8,
+    pub sector: u8,
 }
 
 impl CHS {
@@ -735,5 +771,7 @@ mod tests {
             .iter()
             .filter(|(_, x)| x.is_used() && !x.is_extended())
             .all(|(_, x)| x.sys == 0x83));
+        assert!(mbr.get(10).is_some());
+        assert!(mbr.get(11).is_none());
     }
 }
