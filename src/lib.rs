@@ -17,7 +17,7 @@ pub struct MBR {
     /// You should not change this, otherwise the starting locations of your partitions will be
     /// different in bytes.
     pub sector_size: u64,
-    /// GPT partition header (disk GUID, first/last usable LBA, etc...)
+    /// MBR partition header (disk GUID, first/last usable LBA, etc...)
     pub header: MBRHeader,
     logical_partitions: Vec<MBRPartitionEntry>,
     /// Partitions alignment (in sectors)
