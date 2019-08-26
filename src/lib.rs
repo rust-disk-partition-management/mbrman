@@ -1,25 +1,57 @@
 #[macro_use]
 extern crate serde_derive;
 #[macro_use]
-extern crate err_derive;
+extern crate derive_error;
 
+use bincode::{deserialize_from, serialize, serialize_into};
 use bitvec::prelude::*;
 use serde::de;
 use serde::de::{Deserialize, Deserializer, SeqAccess, Visitor};
 use serde::ser::{Serialize, SerializeTuple, Serializer};
 use std::convert::TryFrom;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::iter::repeat;
 use std::ops::{Index, IndexMut};
+
+const DEFAULT_ALIGN: u32 = 2048;
+const MAX_ALIGN: u32 = 16384;
+const FIRST_USABLE_LBA: u32 = 1;
+const BOOTSTRAP_CODE_SIZE: u64 = 440;
+
+/// The result of reading, writing or managing a GPT.
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// An error
+#[derive(Debug, Error)]
+pub enum Error {
+    /// The CHS address requested cannot be represented in CHS
+    ///
+    /// ### Remark
+    ///
+    /// There is a hard limit around 8GB for CHS addressing.
+    #[error(display = "exceeded the maximum limit of CHS")]
+    LBAExceedsMaximumCHS,
+    /// The CHS address requested exceeds the number of cylinders in the disk
+    #[error(display = "exceeded the maximum number of cylinders on disk")]
+    LBAExceedsMaximumCylinders,
+    /// Derialization errors.
+    #[error(display = "deserialization failed")]
+    Deserialize(#[error(cause)] bincode::Error),
+    /// I/O errors.
+    #[error(display = "generic I/O error")]
+    Io(#[error(cause)] std::io::Error),
+}
 
 pub struct MBR {
     /// Sector size of the disk.
     ///
     /// You should not change this, otherwise the starting locations of your partitions will be
     /// different in bytes.
-    pub sector_size: u64,
+    pub sector_size: u32,
     /// MBR partition header (disk GUID, first/last usable LBA, etc...)
     pub header: MBRHeader,
-    logical_partitions: Vec<MBRPartitionEntry>,
+    /// A vector with all the logical partitions. You can push new ones (even empty ones)
+    pub logical_partitions: Vec<MBRPartitionEntry>,
     /// Partitions alignment (in sectors)
     ///
     /// This field change the behavior of the methods `get_maximum_partition_size()`,
@@ -28,7 +60,7 @@ pub struct MBR {
     ///
     /// # Panics
     /// The value must be greater than 0, otherwise you will encounter divisions by zero.
-    pub align: u64,
+    pub align: u32,
 }
 
 impl MBR {
@@ -77,18 +109,97 @@ impl MBR {
             i => self.logical_partitions.get_mut(i - 5),
         }
     }
+
+    pub fn len(&self) -> usize {
+        4 + self.logical_partitions.len()
+    }
+
+    /// Read the MBR on a reader. This function will try to read the backup header if the primary
+    /// header could not be read.
+    ///
+    /// # Examples:
+    /// Basic usage:
+    /// ```
+    /// let mut f = std::fs::File::open("tests/fixtures/disk1.img")
+    ///     .expect("could not open disk");
+    /// let mbr = mbrman::MBR::read_from(&mut f, 512)
+    ///     .expect("could not read the partition table");
+    /// ```
+    pub fn read_from<R: ?Sized>(mut reader: &mut R, sector_size: u32) -> Result<MBR>
+    where
+        R: Read + Seek,
+    {
+        reader.seek(SeekFrom::Start(BOOTSTRAP_CODE_SIZE))?;
+        let header = MBRHeader::read_from(&mut reader)?;
+
+        let mut logical_partitions = Vec::new();
+        if let Some(extended) = header.get_extended_partition() {
+            // NOTE: The number of sectors is an index field; thus, the zero
+            //       value is invalid, reserved and must not be used in normal
+            //       partition entries. The entry is used by operating systems
+            //       in certain circumstances; in such cases the CHS addresses
+            //       are ignored.
+            let mut ebr_lba = 0;
+            loop {
+                reader.seek(SeekFrom::Start(
+                    ((extended.starting_lba + ebr_lba) * sector_size + 446) as u64,
+                ))?;
+                let (p, next) = EBRHeader::read_from(&mut reader)?.unwrap();
+                logical_partitions.push(p);
+                ebr_lba = next.starting_lba;
+
+                if ebr_lba == 0 {
+                    break;
+                }
+            }
+        }
+
+        let align = MBR::find_alignment(&header, &logical_partitions);
+
+        Ok(MBR {
+            sector_size,
+            header,
+            logical_partitions,
+            align,
+        })
+    }
+
+    fn find_alignment(header: &MBRHeader, logical_partitions: &[MBRPartitionEntry]) -> u32 {
+        let mut lbas = header
+            .iter()
+            .map(|(_, x)| x)
+            .chain(logical_partitions.iter())
+            .filter(|x| x.is_used())
+            .map(|x| x.starting_lba)
+            .collect::<Vec<_>>();
+
+        if lbas.is_empty() {
+            return DEFAULT_ALIGN;
+        }
+
+        if lbas.len() == 1 && lbas[0] == FIRST_USABLE_LBA {
+            return FIRST_USABLE_LBA;
+        }
+
+        (1..=MAX_ALIGN.min(*lbas.iter().max().unwrap_or(&1)))
+            .filter(|div| lbas.iter().all(|x| x % div == 0))
+            .max()
+            .unwrap()
+    }
 }
 
 impl Index<usize> for MBR {
     type Output = MBRPartitionEntry;
 
     fn index(&self, i: usize) -> &Self::Output {
+        assert!(i != 0, "invalid partition index: 0");
         self.get(i).expect("invalid partition")
     }
 }
 
 impl IndexMut<usize> for MBR {
     fn index_mut(&mut self, i: usize) -> &mut Self::Output {
+        assert!(i != 0, "invalid partition index: 0");
         self.get_mut(i).expect("invalid partition")
     }
 }
@@ -162,9 +273,15 @@ impl MBRHeader {
     }
 
     fn get_extended_partition(&self) -> Option<&MBRPartitionEntry> {
-        self.iter()
-            .find(|(_, x)| x.sys == 0x05 || x.sys == 0x0f || x.sys == 0x85)
-            .map(|(_, x)| x)
+        self.iter().find(|(_, x)| x.is_extended()).map(|(_, x)| x)
+    }
+
+    /// Attempt to read a MBR header from a reader.
+    pub fn read_from<R: ?Sized>(mut reader: &mut R) -> bincode::Result<MBRHeader>
+    where
+        R: Read,
+    {
+        deserialize_from(&mut reader)
     }
 }
 
@@ -172,25 +289,15 @@ impl Index<usize> for MBRHeader {
     type Output = MBRPartitionEntry;
 
     fn index(&self, i: usize) -> &Self::Output {
+        assert!(i != 0, "invalid partition index: 0");
         self.get(i).expect("invalid partition")
     }
 }
 
 impl IndexMut<usize> for MBRHeader {
     fn index_mut(&mut self, i: usize) -> &mut Self::Output {
+        assert!(i != 0, "invalid partition index: 0");
         self.get_mut(i).expect("invalid partition")
-    }
-}
-
-pub struct MBRPartitionEntryIter<'a> {
-    phantom: std::marker::PhantomData<&'a ()>,
-}
-
-impl<'a> Iterator for MBRPartitionEntryIter<'a> {
-    type Item = &'a MBRPartitionEntry;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        None
     }
 }
 
@@ -201,6 +308,20 @@ pub struct EBRHeader {
     pub unused_partition_3: [u8; 16],
     pub unused_partition_4: [u8; 16],
     pub boot_signature: Signature55AA,
+}
+
+impl EBRHeader {
+    /// Attempt to read a EBR (Extended Boot Record)) header from a reader.
+    pub fn read_from<R: ?Sized>(mut reader: &mut R) -> bincode::Result<EBRHeader>
+    where
+        R: Read,
+    {
+        deserialize_from(&mut reader)
+    }
+
+    pub fn unwrap(self) -> (MBRPartitionEntry, MBRPartitionEntry) {
+        (self.partition_1, self.partition_2)
+    }
 }
 
 macro_rules! signature {
@@ -222,16 +343,20 @@ macro_rules! signature {
                 A: SeqAccess<'de>,
             {
                 let mut i = 0;
+                let mut bytes = [0; $n];
                 loop {
                     match seq.next_element::<u8>()? {
-                        Some(x) => {
-                            if x != $bytes[i] {
-                                return Err(de::Error::custom(format!("unexpected byte: {:?}", x)));
-                            }
-                        }
+                        Some(x) => bytes[i] = x,
                         None => break,
                     }
                     i += 1;
+                }
+
+                if &bytes != $bytes {
+                    return Err(de::Error::custom(format!(
+                        "invalid signature {:?}, expected: {:?}",
+                        bytes, $bytes
+                    )));
                 }
 
                 Ok($name)
@@ -261,7 +386,7 @@ macro_rules! signature {
         }
 
         impl std::fmt::Debug for $name {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 write!(f, "{:?}", $bytes)
             }
         }
@@ -278,10 +403,21 @@ pub struct MBRPartitionEntry {
     sys: u8,
     last_chs: CHS,
     starting_lba: u32,
-    ending_lba: u32,
+    sectors: u32,
 }
 
 impl MBRPartitionEntry {
+    pub fn empty() -> MBRPartitionEntry {
+        MBRPartitionEntry {
+            boot: false,
+            first_chs: CHS::empty(),
+            sys: 0,
+            last_chs: CHS::empty(),
+            starting_lba: 0,
+            sectors: 0,
+        }
+    }
+
     pub fn is_used(&self) -> bool {
         self.sys > 0
     }
@@ -289,17 +425,18 @@ impl MBRPartitionEntry {
     pub fn is_unused(&self) -> bool {
         !self.is_used()
     }
-}
 
-/// An MBR partition entry
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct EBRPartitionEntry {
-    boot: bool,
-    first_chs: CHS,
-    sys: u8,
-    last_chs: CHS,
-    starting_lba: u32,
-    ending_lba: u32,
+    pub fn is_extended(&self) -> bool {
+        self.sys == 0x05 || self.sys == 0x0f || self.sys == 0x85
+    }
+
+    /// Read a partition entry from the reader at the current position.
+    pub fn read_from<R: ?Sized>(mut reader: &mut R) -> bincode::Result<MBRPartitionEntry>
+    where
+        R: Read,
+    {
+        deserialize_from(&mut reader)
+    }
 }
 
 /// A CHS address (cylinder/head/sector)
@@ -308,21 +445,6 @@ pub struct CHS {
     cylinder: u16,
     head: u8,
     sector: u8,
-}
-
-/// An error
-#[derive(Debug, Error)]
-pub enum Error {
-    /// The CHS address requested cannot be represented in CHS
-    ///
-    /// ### Remark
-    ///
-    /// There is a hard limit around 8GB for CHS addressing.
-    #[error(display = "exceeded the maximum limit of CHS")]
-    LBAExceedsMaximumCHS,
-    /// The CHS address requested exceeds the number of cylinders in the disk
-    #[error(display = "exceeded the maximum number of cylinders on disk")]
-    LBAExceedsMaximumCylinders,
 }
 
 impl CHS {
@@ -348,7 +470,7 @@ impl CHS {
     ///     intend to use partitions that use the CHS addressing. Check the column
     ///     "Access" of [this table on Wikipedia](https://en.wikipedia.org/wiki/Partition_type).
     ///  *  On old systems, partitions must be aligned on cylinders.
-    pub fn from_lba_exact(lba: u32, cylinders: u16, heads: u8, sectors: u8) -> Result<CHS, Error> {
+    pub fn from_lba_exact(lba: u32, cylinders: u16, heads: u8, sectors: u8) -> Result<CHS> {
         // NOTE: code inspired from libfdisk (long2chs)
         let cylinders = u32::from(cylinders);
         let heads = u32::from(heads);
@@ -379,12 +501,7 @@ impl CHS {
     /// chosen will always be the exact cylinder (if the LBA is exactly at the
     /// beginning of a cylinder); or the next cylinder. But it will never
     /// choose the previous cylinder.
-    pub fn from_lba_aligned(
-        lba: u32,
-        cylinders: u16,
-        heads: u8,
-        sectors: u8,
-    ) -> Result<CHS, Error> {
+    pub fn from_lba_aligned(lba: u32, cylinders: u16, heads: u8, sectors: u8) -> Result<CHS> {
         let cylinders = u32::from(cylinders);
         let heads = u32::from(heads);
         let sectors = u32::from(sectors);
@@ -507,6 +624,10 @@ impl Serialize for CHS {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
+
+    const DISK1: &str = "tests/fixtures/disk1.img";
+    const DISK2: &str = "tests/fixtures/disk2.img";
 
     #[test]
     fn deserizlize_maximum_chs_value() {
@@ -575,5 +696,44 @@ mod tests {
         let chs = CHS::from_lba_exact(667296, 2484, 16, 63).unwrap();
         assert_eq!(chs.head, 0);
         assert_eq!(chs.sector, 1);
+    }
+
+    #[test]
+    fn read_disk1() {
+        let mut mbr = MBR::read_from(&mut File::open(DISK1).unwrap(), 512).unwrap();
+        assert!(mbr.header.partition_1.is_used());
+        assert!(mbr.header.partition_2.is_used());
+        assert!(mbr.header.partition_3.is_unused());
+        assert!(mbr.header.partition_4.is_unused());
+        assert_eq!(mbr.len(), 4);
+        assert_eq!(mbr.header.iter().count(), 4);
+        assert_eq!(mbr.header.iter_mut().count(), 4);
+        assert_eq!(mbr.iter_mut().count(), 4);
+        assert_eq!(mbr.header.partition_1.sys, 0x06);
+        assert_eq!(mbr.header.partition_1.starting_lba, 1);
+        assert_eq!(mbr.header.partition_1.sectors, 1);
+        assert_eq!(mbr.header.partition_2.sys, 0x0b);
+        assert_eq!(mbr.header.partition_2.starting_lba, 3);
+        assert_eq!(mbr.header.partition_2.sectors, 1);
+    }
+
+    #[test]
+    fn read_disk2() {
+        let mut mbr = MBR::read_from(&mut File::open(DISK2).unwrap(), 512).unwrap();
+        assert!(mbr.header.partition_1.is_used());
+        assert!(mbr.header.partition_2.is_unused());
+        assert!(mbr.header.partition_3.is_unused());
+        assert!(mbr.header.partition_4.is_used());
+        assert_eq!(mbr.header.partition_4.sys, 0x05);
+        assert_eq!(mbr.header.partition_4.starting_lba, 5);
+        assert_eq!(mbr.header.partition_4.sectors, 15);
+        assert_eq!(mbr.len(), 10);
+        assert_eq!(mbr.iter().count(), 10);
+        assert_eq!(mbr.iter_mut().count(), 10);
+        assert_eq!(mbr.iter().filter(|(_, x)| x.is_used()).count(), 8);
+        assert!(mbr
+            .iter()
+            .filter(|(_, x)| x.is_used() && !x.is_extended())
+            .all(|(_, x)| x.sys == 0x83));
     }
 }
