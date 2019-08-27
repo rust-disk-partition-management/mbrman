@@ -130,22 +130,16 @@ impl MBR {
         4 + self.logical_partitions.len()
     }
 
-    /// Make a new MBR based on a reader. (This operation does not write anything to disk!)
+    /// Make a new MBR
     ///
     /// # Examples:
     /// Basic usage:
     /// ```
-    /// let ss = 512;
-    /// let data = vec![0; 100 * ss as usize];
-    /// let mut cur = std::io::Cursor::new(data);
-    /// let gpt = mbrman::MBR::new_from(&mut cur, ss as u32, [0x01, 0x02, 0x03, 0x04])
+    /// let mbr = mbrman::MBR::new(512, [0x01, 0x02, 0x03, 0x04])
     ///     .expect("could not make a partition table");
     /// ```
-    pub fn new_from<R>(reader: &mut R, sector_size: u32, disk_signature: [u8; 4]) -> Result<MBR>
-    where
-        R: Read + Seek,
-    {
-        let header = MBRHeader::new_from(reader, sector_size, disk_signature)?;
+    pub fn new(sector_size: u32, disk_signature: [u8; 4]) -> Result<MBR> {
+        let header = MBRHeader::new(disk_signature)?;
 
         Ok(MBR {
             sector_size,
@@ -170,7 +164,6 @@ impl MBR {
     where
         R: Read + Seek,
     {
-        reader.seek(SeekFrom::Start(BOOTSTRAP_CODE_SIZE))?;
         let header = MBRHeader::read_from(&mut reader)?;
 
         let mut logical_partitions = Vec::new();
@@ -186,8 +179,22 @@ impl MBR {
                     ((extended.starting_lba + ebr_lba) * sector_size + EBR_BOOTSTRAP_CODE_SIZE)
                         as u64,
                 ))?;
-                let (p, next) = EBRHeader::read_from(&mut reader)?.unwrap();
-                logical_partitions.push(p);
+                let (p, next) = match EBRHeader::read_from(&mut reader) {
+                    Ok(ebr) => ebr.unwrap(),
+                    Err(err) => {
+                        if ebr_lba == 0 {
+                            // NOTE: if the extended partition is empty, it is not required that an
+                            //       EBR exists
+                            break;
+                        } else {
+                            return Err(err.into());
+                        }
+                    }
+                };
+                logical_partitions.push(MBRPartitionEntry {
+                    starting_lba: extended.starting_lba + ebr_lba + p.starting_lba,
+                    ..p
+                });
 
                 if next.starting_lba > 0 && ebr_lba >= next.starting_lba {
                     return Err(Error::InconsistentEBR);
@@ -232,6 +239,47 @@ impl MBR {
             .filter(|div| lbas.iter().all(|x| x % div == 0))
             .max()
             .unwrap()
+    }
+
+    /// Write the MBR to a writer. This function will seek automatically in the writer to write the
+    /// primary header and the backup header at their proper location.
+    ///
+    /// # Examples:
+    /// Basic usage:
+    /// ```
+    /// let ss = 512;
+    /// let data = vec![0; 100 * ss as usize];
+    /// let mut cur = std::io::Cursor::new(data);
+    /// let mut mbr = mbrman::MBR::new(ss as u32, [0xff; 4])
+    ///     .expect("could not make a partition table");
+    ///
+    /// // actually write:
+    /// mbr.write_into(&mut cur)
+    ///     .expect("could not write MBR to disk")
+    /// ```
+    pub fn write_into<W: ?Sized>(&mut self, mut writer: &mut W) -> Result<()>
+    where
+        W: Write + Seek,
+    {
+        self.header.write_into(&mut writer)?;
+
+        if let Some(extended) = self.header.get_extended_partition() {
+            let ebr_starting_lbas = self
+                .logical_partitions
+                .iter()
+                .skip(1)
+                .map(|x| x.starting_lba)
+                .chain([0_u32].into_iter().copied());
+            for (ebr_lba, p) in ebr_starting_lbas.zip(self.logical_partitions.iter()) {
+                writer.seek(SeekFrom::Start(
+                    ((p.starting_lba - 1) * self.sector_size + EBR_BOOTSTRAP_CODE_SIZE) as u64,
+                ))?;
+                let ebr = EBRHeader::new(p, ebr_lba.saturating_sub(extended.starting_lba + 1));
+                serialize_into(&mut writer, &ebr)?;
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -338,23 +386,19 @@ impl MBRHeader {
         self.iter().find(|(_, x)| x.is_extended()).map(|(_, x)| x)
     }
 
-    /// Attempt to read a MBR header from a reader.
-    pub fn read_from<R: ?Sized>(mut reader: &mut R) -> bincode::Result<MBRHeader>
-    where
-        R: Read,
-    {
-        deserialize_from(&mut reader)
-    }
-
-    /// Make a new MBR header based on a reader.
-    pub fn new_from<R>(
-        reader: &mut R,
-        sector_size: u32,
-        disk_signature: [u8; 4],
-    ) -> Result<MBRHeader>
+    /// Attempt to read a MBR header from a reader.  This operation will seek at the
+    /// correct location before trying to write to disk.
+    pub fn read_from<R: ?Sized>(mut reader: &mut R) -> Result<MBRHeader>
     where
         R: Read + Seek,
     {
+        reader.seek(SeekFrom::Start(BOOTSTRAP_CODE_SIZE))?;
+
+        Ok(deserialize_from(&mut reader)?)
+    }
+
+    /// Make a new MBR header
+    pub fn new(disk_signature: [u8; 4]) -> Result<MBRHeader> {
         Ok(MBRHeader {
             disk_signature,
             copy_protected: [0x00, 0x00],
@@ -364,6 +408,18 @@ impl MBRHeader {
             partition_4: MBRPartitionEntry::empty(),
             boot_signature: Signature55AA,
         })
+    }
+
+    /// Write the MBR header into a writer. This operation will seek at the
+    /// correct location before trying to write to disk.
+    pub fn write_into<W: ?Sized>(&mut self, mut writer: &mut W) -> Result<()>
+    where
+        W: Write + Seek,
+    {
+        writer.seek(SeekFrom::Start(BOOTSTRAP_CODE_SIZE))?;
+        serialize_into(&mut writer, &self)?;
+
+        Ok(())
     }
 }
 
@@ -402,6 +458,33 @@ impl EBRHeader {
 
     fn unwrap(self) -> (MBRPartitionEntry, MBRPartitionEntry) {
         (self.partition_1, self.partition_2)
+    }
+
+    fn new(p: &MBRPartitionEntry, starting_lba: u32) -> EBRHeader {
+        let partition_1 = MBRPartitionEntry {
+            boot: p.boot,
+            first_chs: p.first_chs,
+            sys: p.sys,
+            last_chs: p.last_chs,
+            starting_lba: 1,
+            sectors: p.sectors,
+        };
+        let partition_2 = MBRPartitionEntry {
+            boot: false,
+            first_chs: CHS::empty(),
+            sys: 0,
+            last_chs: CHS::empty(),
+            starting_lba,
+            sectors: 0,
+        };
+
+        EBRHeader {
+            partition_1,
+            partition_2,
+            unused_partition_3: [0; 16],
+            unused_partition_4: [0; 16],
+            boot_signature: Signature55AA,
+        }
     }
 }
 
@@ -460,7 +543,7 @@ macro_rules! signature {
             {
                 let mut seq = serializer.serialize_tuple($n)?;
                 for x in $bytes.iter() {
-                    seq.serialize_element(&x)?;
+                    seq.serialize_element::<u8>(&x)?;
                 }
                 seq.end()
             }
@@ -706,6 +789,7 @@ impl Serialize for CHS {
 mod tests {
     use super::*;
     use std::fs::File;
+    use std::io::Cursor;
 
     const DISK1: &str = "tests/fixtures/disk1.img";
     const DISK2: &str = "tests/fixtures/disk2.img";
@@ -818,5 +902,65 @@ mod tests {
             .all(|(_, x)| x.sys == 0x83));
         assert!(mbr.get(10).is_some());
         assert!(mbr.get(11).is_none());
+    }
+
+    #[test]
+    fn read_empty_extended_partition() {
+        let ss = 512_u32;
+        let data = vec![0; 10 * ss as usize];
+        let mut cur = Cursor::new(data);
+        let mut mbr = MBR::new(ss, [0xff; 4]).unwrap();
+        mbr.header.partition_1.sys = 0x0f;
+        mbr.header.partition_1.starting_lba = 1;
+        mbr.header.partition_1.sectors = 10;
+
+        mbr.write_into(&mut cur).unwrap();
+
+        let mbr = MBR::read_from(&mut cur, ss).unwrap();
+        assert_eq!(mbr.header.partition_1.sys, 0x0f);
+        assert_eq!(mbr.header.partition_1.starting_lba, 1);
+        assert_eq!(mbr.header.partition_1.sectors, 10);
+        assert!(mbr.logical_partitions.is_empty());
+    }
+
+    #[test]
+    fn new_mbr_write_then_read_then_do_it_again() {
+        let ss = 512_u32;
+        let data = vec![0; 100 * ss as usize];
+        let mut cur = Cursor::new(data);
+        let mut mbr = MBR::new(ss, [0xff; 4]).unwrap();
+        mbr.header.partition_1.sys = 0x83;
+        mbr.header.partition_1.starting_lba = 1;
+        mbr.header.partition_1.sectors = 10;
+        mbr.header.partition_3.sys = 0x0f;
+        mbr.header.partition_3.starting_lba = 11;
+        mbr.header.partition_3.sectors = 60;
+        let mut empty = MBRPartitionEntry::empty();
+        empty.starting_lba = 12;
+        empty.sectors = 1;
+        mbr.logical_partitions.push(empty);
+        let mut part6 = MBRPartitionEntry {
+            boot: false,
+            first_chs: CHS::empty(),
+            sys: 0x83,
+            last_chs: CHS::empty(),
+            starting_lba: 14,
+            sectors: 1,
+        };
+        mbr.logical_partitions.push(part6);
+
+        mbr.write_into(&mut cur).unwrap();
+
+        let mbr = MBR::read_from(&mut cur, ss).unwrap();
+        assert_eq!(mbr.header.partition_1.sys, 0x83);
+        assert_eq!(mbr.header.partition_1.starting_lba, 1);
+        assert_eq!(mbr.header.partition_1.sectors, 10);
+        assert_eq!(mbr.logical_partitions.len(), 2);
+        assert_eq!(mbr.logical_partitions[0].starting_lba, 12);
+        assert_eq!(mbr.logical_partitions[0].sectors, 1);
+        assert_eq!(mbr.logical_partitions[0].sys, 0);
+        assert_eq!(mbr.logical_partitions[1].starting_lba, 14);
+        assert_eq!(mbr.logical_partitions[1].sectors, 1);
+        assert_eq!(mbr.logical_partitions[1].sys, 0x83);
     }
 }
