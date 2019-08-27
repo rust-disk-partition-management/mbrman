@@ -178,6 +178,7 @@ impl MBR {
             //       in certain circumstances; in such cases the CHS addresses
             //       are ignored.
             let mut relative_ebr_lba = 0;
+            let mut ebr_sectors = extended.sectors;
             loop {
                 reader.seek(SeekFrom::Start(
                     ((extended.starting_lba + relative_ebr_lba) * sector_size
@@ -198,6 +199,7 @@ impl MBR {
                 logical_partitions.push(LogicalPartition {
                     partition,
                     absolute_ebr_lba: extended.starting_lba + relative_ebr_lba,
+                    ebr_sectors,
                 });
 
                 if next.starting_lba > 0 && relative_ebr_lba >= next.starting_lba {
@@ -205,6 +207,7 @@ impl MBR {
                 }
 
                 relative_ebr_lba = next.starting_lba;
+                ebr_sectors = next.sectors;
 
                 if relative_ebr_lba == 0 {
                     break;
@@ -476,7 +479,7 @@ impl EBRHeader {
             sys: 0,
             last_chs: CHS::empty(),
             starting_lba: next_starting_lba,
-            sectors: 0,
+            sectors: l.ebr_sectors,
         };
 
         EBRHeader {
@@ -604,9 +607,11 @@ impl MBRPartitionEntry {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct LogicalPartition {
     pub partition: MBRPartitionEntry,
     pub absolute_ebr_lba: u32,
+    pub ebr_sectors: u32,
 }
 
 /// A CHS address (cylinder/head/sector)
@@ -908,6 +913,10 @@ mod tests {
             .all(|(_, x)| x.sys == 0x83));
         assert!(mbr.get(10).is_some());
         assert!(mbr.get(11).is_none());
+        assert_eq!(mbr.logical_partitions[0].ebr_sectors, 15);
+        assert_eq!(mbr.logical_partitions[1].ebr_sectors, 3);
+        assert_eq!(mbr.logical_partitions[2].ebr_sectors, 4);
+        assert_eq!(mbr.logical_partitions[3].ebr_sectors, 2);
     }
 
     #[test]
@@ -947,6 +956,7 @@ mod tests {
         mbr.logical_partitions.push(LogicalPartition {
             partition: empty,
             absolute_ebr_lba: 5,
+            ebr_sectors: 2,
         });
         mbr.logical_partitions.push(LogicalPartition {
             partition: MBRPartitionEntry {
@@ -958,6 +968,7 @@ mod tests {
                 sectors: 1,
             },
             absolute_ebr_lba: 7,
+            ebr_sectors: 3,
         });
 
         mbr.write_into(&mut cur).unwrap();
@@ -971,9 +982,11 @@ mod tests {
         assert_eq!(mbr.logical_partitions[0].partition.starting_lba, 1);
         assert_eq!(mbr.logical_partitions[0].partition.sectors, 1);
         assert_eq!(mbr.logical_partitions[0].partition.sys, 0);
+        assert_eq!(mbr.logical_partitions[0].ebr_sectors, 6);
         assert_eq!(mbr.logical_partitions[1].absolute_ebr_lba, 7);
         assert_eq!(mbr.logical_partitions[1].partition.starting_lba, 2);
         assert_eq!(mbr.logical_partitions[1].partition.sectors, 1);
         assert_eq!(mbr.logical_partitions[1].partition.sys, 0x83);
+        assert_eq!(mbr.logical_partitions[1].ebr_sectors, 2);
     }
 }
