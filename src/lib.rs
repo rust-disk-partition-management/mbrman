@@ -130,6 +130,31 @@ impl MBR {
         4 + self.logical_partitions.len()
     }
 
+    /// Make a new MBR based on a reader. (This operation does not write anything to disk!)
+    ///
+    /// # Examples:
+    /// Basic usage:
+    /// ```
+    /// let ss = 512;
+    /// let data = vec![0; 100 * ss as usize];
+    /// let mut cur = std::io::Cursor::new(data);
+    /// let gpt = mbrman::MBR::new_from(&mut cur, ss as u32, [0x01, 0x02, 0x03, 0x04])
+    ///     .expect("could not make a partition table");
+    /// ```
+    pub fn new_from<R>(reader: &mut R, sector_size: u32, disk_signature: [u8; 4]) -> Result<MBR>
+    where
+        R: Read + Seek,
+    {
+        let header = MBRHeader::new_from(reader, sector_size, disk_signature)?;
+
+        Ok(MBR {
+            sector_size,
+            header,
+            logical_partitions: Vec::new(),
+            align: DEFAULT_ALIGN,
+        })
+    }
+
     /// Read the MBR on a reader. This function will try to read the backup header if the primary
     /// header could not be read.
     ///
@@ -319,6 +344,26 @@ impl MBRHeader {
         R: Read,
     {
         deserialize_from(&mut reader)
+    }
+
+    /// Make a new MBR header based on a reader.
+    pub fn new_from<R>(
+        reader: &mut R,
+        sector_size: u32,
+        disk_signature: [u8; 4],
+    ) -> Result<MBRHeader>
+    where
+        R: Read + Seek,
+    {
+        Ok(MBRHeader {
+            disk_signature,
+            copy_protected: [0x00, 0x00],
+            partition_1: MBRPartitionEntry::empty(),
+            partition_2: MBRPartitionEntry::empty(),
+            partition_3: MBRPartitionEntry::empty(),
+            partition_4: MBRPartitionEntry::empty(),
+            boot_signature: Signature55AA,
+        })
     }
 }
 
