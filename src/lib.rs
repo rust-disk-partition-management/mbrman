@@ -3,7 +3,7 @@ extern crate serde_derive;
 #[macro_use]
 extern crate derive_error;
 
-use bincode::{deserialize_from, serialize, serialize_into};
+use bincode::{deserialize_from, serialize_into};
 use bitvec::prelude::*;
 use serde::de;
 use serde::de::{Deserialize, Deserializer, SeqAccess, Visitor};
@@ -55,7 +55,7 @@ pub struct MBR {
     /// MBR partition header (disk GUID, first/last usable LBA, etc...)
     pub header: MBRHeader,
     /// A vector with all the logical partitions. You can push new ones (even empty ones)
-    pub logical_partitions: Vec<MBRPartitionEntry>,
+    pub logical_partitions: Vec<LogicalPartition>,
     /// Partitions alignment (in sectors)
     ///
     /// This field change the behavior of the methods `get_maximum_partition_size()`,
@@ -74,6 +74,7 @@ impl MBR {
         self.header.iter().chain(
             self.logical_partitions
                 .iter()
+                .map(|x| &x.partition)
                 .enumerate()
                 .map(|(i, x)| (i + 5, x)),
         )
@@ -88,7 +89,7 @@ impl MBR {
             &mut self.header.partition_3,
             &mut self.header.partition_4,
         ];
-        partitions.extend(self.logical_partitions.iter_mut());
+        partitions.extend(self.logical_partitions.iter_mut().map(|x| &mut x.partition));
         partitions.into_iter().enumerate().map(|(i, x)| (i + 1, x))
     }
 
@@ -105,7 +106,7 @@ impl MBR {
             2 => Some(&self.header.partition_2),
             3 => Some(&self.header.partition_3),
             4 => Some(&self.header.partition_4),
-            i => self.logical_partitions.get(i - 5),
+            i => self.logical_partitions.get(i - 5).map(|x| &x.partition),
         }
     }
 
@@ -122,7 +123,10 @@ impl MBR {
             2 => Some(&mut self.header.partition_2),
             3 => Some(&mut self.header.partition_3),
             4 => Some(&mut self.header.partition_4),
-            i => self.logical_partitions.get_mut(i - 5),
+            i => self
+                .logical_partitions
+                .get_mut(i - 5)
+                .map(|x| &mut x.partition),
         }
     }
 
@@ -173,16 +177,16 @@ impl MBR {
             //       partition entries. The entry is used by operating systems
             //       in certain circumstances; in such cases the CHS addresses
             //       are ignored.
-            let mut ebr_lba = 0;
+            let mut relative_ebr_lba = 0;
             loop {
                 reader.seek(SeekFrom::Start(
-                    ((extended.starting_lba + ebr_lba) * sector_size + EBR_BOOTSTRAP_CODE_SIZE)
-                        as u64,
+                    ((extended.starting_lba + relative_ebr_lba) * sector_size
+                        + EBR_BOOTSTRAP_CODE_SIZE) as u64,
                 ))?;
-                let (p, next) = match EBRHeader::read_from(&mut reader) {
+                let (partition, next) = match EBRHeader::read_from(&mut reader) {
                     Ok(ebr) => ebr.unwrap(),
                     Err(err) => {
-                        if ebr_lba == 0 {
+                        if relative_ebr_lba == 0 {
                             // NOTE: if the extended partition is empty, it is not required that an
                             //       EBR exists
                             break;
@@ -191,18 +195,18 @@ impl MBR {
                         }
                     }
                 };
-                logical_partitions.push(MBRPartitionEntry {
-                    starting_lba: extended.starting_lba + ebr_lba + p.starting_lba,
-                    ..p
+                logical_partitions.push(LogicalPartition {
+                    partition,
+                    absolute_ebr_lba: extended.starting_lba + relative_ebr_lba,
                 });
 
-                if next.starting_lba > 0 && ebr_lba >= next.starting_lba {
+                if next.starting_lba > 0 && relative_ebr_lba >= next.starting_lba {
                     return Err(Error::InconsistentEBR);
                 }
 
-                ebr_lba = next.starting_lba;
+                relative_ebr_lba = next.starting_lba;
 
-                if ebr_lba == 0 {
+                if relative_ebr_lba == 0 {
                     break;
                 }
             }
@@ -218,11 +222,11 @@ impl MBR {
         })
     }
 
-    fn find_alignment(header: &MBRHeader, logical_partitions: &[MBRPartitionEntry]) -> u32 {
+    fn find_alignment(header: &MBRHeader, logical_partitions: &[LogicalPartition]) -> u32 {
         let lbas = header
             .iter()
             .map(|(_, x)| x)
-            .chain(logical_partitions.iter())
+            .chain(logical_partitions.iter().map(|x| &x.partition))
             .filter(|x| x.is_used())
             .map(|x| x.starting_lba)
             .collect::<Vec<_>>();
@@ -264,17 +268,22 @@ impl MBR {
         self.header.write_into(&mut writer)?;
 
         if let Some(extended) = self.header.get_extended_partition() {
-            let ebr_starting_lbas = self
+            let next_absolute_ebr_lbas = self
                 .logical_partitions
                 .iter()
                 .skip(1)
-                .map(|x| x.starting_lba)
+                .map(|x| x.absolute_ebr_lba)
                 .chain([0_u32].into_iter().copied());
-            for (ebr_lba, p) in ebr_starting_lbas.zip(self.logical_partitions.iter()) {
+            for (next_absolute_ebr_lba, l) in
+                next_absolute_ebr_lbas.zip(self.logical_partitions.iter())
+            {
                 writer.seek(SeekFrom::Start(
-                    ((p.starting_lba - 1) * self.sector_size + EBR_BOOTSTRAP_CODE_SIZE) as u64,
+                    (l.absolute_ebr_lba * self.sector_size + EBR_BOOTSTRAP_CODE_SIZE) as u64,
                 ))?;
-                let ebr = EBRHeader::new(p, ebr_lba.saturating_sub(extended.starting_lba + 1));
+                let ebr = EBRHeader::new(
+                    l,
+                    next_absolute_ebr_lba.saturating_sub(extended.starting_lba),
+                );
                 serialize_into(&mut writer, &ebr)?;
             }
         }
@@ -460,26 +469,18 @@ impl EBRHeader {
         (self.partition_1, self.partition_2)
     }
 
-    fn new(p: &MBRPartitionEntry, starting_lba: u32) -> EBRHeader {
-        let partition_1 = MBRPartitionEntry {
-            boot: p.boot,
-            first_chs: p.first_chs,
-            sys: p.sys,
-            last_chs: p.last_chs,
-            starting_lba: 1,
-            sectors: p.sectors,
-        };
+    fn new(l: &LogicalPartition, next_starting_lba: u32) -> EBRHeader {
         let partition_2 = MBRPartitionEntry {
             boot: false,
             first_chs: CHS::empty(),
             sys: 0,
             last_chs: CHS::empty(),
-            starting_lba,
+            starting_lba: next_starting_lba,
             sectors: 0,
         };
 
         EBRHeader {
-            partition_1,
+            partition_1: l.partition.clone(),
             partition_2,
             unused_partition_3: [0; 16],
             unused_partition_4: [0; 16],
@@ -601,6 +602,11 @@ impl MBRPartitionEntry {
     {
         deserialize_from(&mut reader)
     }
+}
+
+pub struct LogicalPartition {
+    pub partition: MBRPartitionEntry,
+    pub absolute_ebr_lba: u32,
 }
 
 /// A CHS address (cylinder/head/sector)
@@ -926,41 +932,48 @@ mod tests {
     #[test]
     fn new_mbr_write_then_read_then_do_it_again() {
         let ss = 512_u32;
-        let data = vec![0; 100 * ss as usize];
+        let data = vec![0; 10 * ss as usize];
         let mut cur = Cursor::new(data);
         let mut mbr = MBR::new(ss, [0xff; 4]).unwrap();
         mbr.header.partition_1.sys = 0x83;
         mbr.header.partition_1.starting_lba = 1;
-        mbr.header.partition_1.sectors = 10;
+        mbr.header.partition_1.sectors = 4;
         mbr.header.partition_3.sys = 0x0f;
-        mbr.header.partition_3.starting_lba = 11;
-        mbr.header.partition_3.sectors = 60;
+        mbr.header.partition_3.starting_lba = 5;
+        mbr.header.partition_3.sectors = 6;
         let mut empty = MBRPartitionEntry::empty();
-        empty.starting_lba = 12;
+        empty.starting_lba = 1;
         empty.sectors = 1;
-        mbr.logical_partitions.push(empty);
-        let mut part6 = MBRPartitionEntry {
-            boot: false,
-            first_chs: CHS::empty(),
-            sys: 0x83,
-            last_chs: CHS::empty(),
-            starting_lba: 14,
-            sectors: 1,
-        };
-        mbr.logical_partitions.push(part6);
+        mbr.logical_partitions.push(LogicalPartition {
+            partition: empty,
+            absolute_ebr_lba: 5,
+        });
+        mbr.logical_partitions.push(LogicalPartition {
+            partition: MBRPartitionEntry {
+                boot: false,
+                first_chs: CHS::empty(),
+                sys: 0x83,
+                last_chs: CHS::empty(),
+                starting_lba: 2,
+                sectors: 1,
+            },
+            absolute_ebr_lba: 7,
+        });
 
         mbr.write_into(&mut cur).unwrap();
 
         let mbr = MBR::read_from(&mut cur, ss).unwrap();
         assert_eq!(mbr.header.partition_1.sys, 0x83);
         assert_eq!(mbr.header.partition_1.starting_lba, 1);
-        assert_eq!(mbr.header.partition_1.sectors, 10);
+        assert_eq!(mbr.header.partition_1.sectors, 4);
         assert_eq!(mbr.logical_partitions.len(), 2);
-        assert_eq!(mbr.logical_partitions[0].starting_lba, 12);
-        assert_eq!(mbr.logical_partitions[0].sectors, 1);
-        assert_eq!(mbr.logical_partitions[0].sys, 0);
-        assert_eq!(mbr.logical_partitions[1].starting_lba, 14);
-        assert_eq!(mbr.logical_partitions[1].sectors, 1);
-        assert_eq!(mbr.logical_partitions[1].sys, 0x83);
+        assert_eq!(mbr.logical_partitions[0].absolute_ebr_lba, 5);
+        assert_eq!(mbr.logical_partitions[0].partition.starting_lba, 1);
+        assert_eq!(mbr.logical_partitions[0].partition.sectors, 1);
+        assert_eq!(mbr.logical_partitions[0].partition.sys, 0);
+        assert_eq!(mbr.logical_partitions[1].absolute_ebr_lba, 7);
+        assert_eq!(mbr.logical_partitions[1].partition.starting_lba, 2);
+        assert_eq!(mbr.logical_partitions[1].partition.sectors, 1);
+        assert_eq!(mbr.logical_partitions[1].partition.sys, 0x83);
     }
 }
