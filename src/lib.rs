@@ -10,7 +10,7 @@ use serde::de::{Deserialize, Deserializer, SeqAccess, Visitor};
 use serde::ser::{Serialize, SerializeTuple, Serializer};
 use std::convert::TryFrom;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::iter::repeat;
+use std::iter::{once, repeat};
 use std::ops::{Index, IndexMut};
 
 const DEFAULT_ALIGN: u32 = 2048;
@@ -282,7 +282,7 @@ impl MBR {
                 .iter()
                 .skip(1)
                 .map(|x| Some(x))
-                .chain(repeat(None));
+                .chain(once(None));
             for (l, next) in self.logical_partitions.iter().zip(next_logical_partitions) {
                 writer.seek(SeekFrom::Start(
                     (l.absolute_ebr_lba * self.sector_size + EBR_BOOTSTRAP_CODE_SIZE) as u64,
