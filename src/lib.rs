@@ -264,7 +264,7 @@ impl MBR {
     /// mbr.write_into(&mut cur)
     ///     .expect("could not write MBR to disk")
     /// ```
-    pub fn write_into<W: ?Sized>(&mut self, mut writer: &mut W) -> Result<()>
+    pub fn write_into<W: ?Sized>(&self, mut writer: &mut W) -> Result<()>
     where
         W: Write + Seek,
     {
@@ -275,9 +275,9 @@ impl MBR {
                 .logical_partitions
                 .iter()
                 .skip(1)
-                .map(|x| x.absolute_ebr_lba)
-                .chain([0_u32].into_iter().copied());
-            for (next_absolute_ebr_lba, l) in
+                .map(|x| (x.absolute_ebr_lba, x.ebr_sectors))
+                .chain([(0_u32, 0_u32)].into_iter().copied());
+            for ((next_absolute_ebr_lba, ebr_sectors), l) in
                 next_absolute_ebr_lbas.zip(self.logical_partitions.iter())
             {
                 writer.seek(SeekFrom::Start(
@@ -286,6 +286,7 @@ impl MBR {
                 let ebr = EBRHeader::new(
                     l,
                     next_absolute_ebr_lba.saturating_sub(extended.starting_lba),
+                    ebr_sectors,
                 );
                 serialize_into(&mut writer, &ebr)?;
             }
@@ -424,7 +425,7 @@ impl MBRHeader {
 
     /// Write the MBR header into a writer. This operation will seek at the
     /// correct location before trying to write to disk.
-    pub fn write_into<W: ?Sized>(&mut self, mut writer: &mut W) -> Result<()>
+    pub fn write_into<W: ?Sized>(&self, mut writer: &mut W) -> Result<()>
     where
         W: Write + Seek,
     {
@@ -472,14 +473,14 @@ impl EBRHeader {
         (self.partition_1, self.partition_2)
     }
 
-    fn new(l: &LogicalPartition, next_starting_lba: u32) -> EBRHeader {
+    fn new(l: &LogicalPartition, relative_ebr_lba: u32, ebr_sectors: u32) -> EBRHeader {
         let partition_2 = MBRPartitionEntry {
             boot: false,
             first_chs: CHS::empty(),
-            sys: 0,
+            sys: if relative_ebr_lba > 0 { 0x05 } else { 0 },
             last_chs: CHS::empty(),
-            starting_lba: next_starting_lba,
-            sectors: l.ebr_sectors,
+            starting_lba: relative_ebr_lba,
+            sectors: ebr_sectors,
         };
 
         EBRHeader {
@@ -913,16 +914,16 @@ mod tests {
         assert_eq!(mbr.header.partition_2.first_chs, CHS::new(0, 1, 3));
         assert_eq!(mbr.header.partition_2.last_chs, CHS::new(3, 0, 2));
         assert_eq!(mbr.header.partition_2.sectors, 15);
-        assert_eq!(mbr.len(), 10);
-        assert_eq!(mbr.iter().count(), 10);
-        assert_eq!(mbr.iter_mut().count(), 10);
-        assert_eq!(mbr.iter().filter(|(_, x)| x.is_used()).count(), 8);
+        assert_eq!(mbr.len(), 9);
+        assert_eq!(mbr.iter().count(), 9);
+        assert_eq!(mbr.iter_mut().count(), 9);
+        assert_eq!(mbr.iter().filter(|(_, x)| x.is_used()).count(), 7);
         assert!(mbr
             .iter()
             .filter(|(_, x)| x.is_used() && !x.is_extended())
             .all(|(_, x)| x.sys == 0x83));
-        assert!(mbr.get(10).is_some());
-        assert!(mbr.get(11).is_none());
+        assert!(mbr.get(9).is_some());
+        assert!(mbr.get(10).is_none());
         assert_eq!(mbr.logical_partitions[0].absolute_ebr_lba, 5);
         assert_eq!(mbr.logical_partitions[0].ebr_sectors, 15);
         assert_eq!(mbr.logical_partitions[1].absolute_ebr_lba, 7);
@@ -935,10 +936,7 @@ mod tests {
             CHS::new(1, 1, 3)
         );
         assert_eq!(
-            mbr.logical_partitions[2]
-                .partition
-                .first_chs
-                .to_lba(2, 3),
+            mbr.logical_partitions[2].partition.first_chs.to_lba(2, 3),
             mbr.logical_partitions[2].absolute_ebr_lba
                 + mbr.logical_partitions[2].partition.starting_lba
         );
@@ -957,9 +955,7 @@ mod tests {
         assert_eq!(mbr.logical_partitions[3].ebr_sectors, 2);
         assert_eq!(mbr.logical_partitions[4].absolute_ebr_lba, 16);
         assert_eq!(mbr.logical_partitions[4].ebr_sectors, 2);
-        assert_eq!(mbr.logical_partitions[5].absolute_ebr_lba, 18);
-        assert_eq!(mbr.logical_partitions[5].ebr_sectors, 2);
-        assert!(mbr.logical_partitions.get(6).is_none());
+        assert!(mbr.logical_partitions.get(5).is_none());
     }
 
     #[test]
@@ -982,7 +978,7 @@ mod tests {
     }
 
     #[test]
-    fn new_mbr_write_then_read_then_do_it_again() {
+    fn new_mbr_then_write_then_read_twice() {
         let ss = 512_u32;
         let data = vec![0; 10 * ss as usize];
         let mut cur = Cursor::new(data);
@@ -1014,6 +1010,8 @@ mod tests {
             ebr_sectors: 3,
         });
 
+        // NOTE: don't put this in a loop otherwise it's hard to guess if the error come from
+        //       reading, writing or reading after writing again
         mbr.write_into(&mut cur).unwrap();
 
         let mbr = MBR::read_from(&mut cur, ss).unwrap();
@@ -1030,6 +1028,24 @@ mod tests {
         assert_eq!(mbr.logical_partitions[1].partition.starting_lba, 2);
         assert_eq!(mbr.logical_partitions[1].partition.sectors, 1);
         assert_eq!(mbr.logical_partitions[1].partition.sys, 0x83);
-        assert_eq!(mbr.logical_partitions[1].ebr_sectors, 2);
+        assert_eq!(mbr.logical_partitions[1].ebr_sectors, 3);
+
+        mbr.write_into(&mut cur).unwrap();
+
+        let mbr = MBR::read_from(&mut cur, ss).unwrap();
+        assert_eq!(mbr.header.partition_1.sys, 0x83);
+        assert_eq!(mbr.header.partition_1.starting_lba, 1);
+        assert_eq!(mbr.header.partition_1.sectors, 4);
+        assert_eq!(mbr.logical_partitions.len(), 2);
+        assert_eq!(mbr.logical_partitions[0].absolute_ebr_lba, 5);
+        assert_eq!(mbr.logical_partitions[0].partition.starting_lba, 1);
+        assert_eq!(mbr.logical_partitions[0].partition.sectors, 1);
+        assert_eq!(mbr.logical_partitions[0].partition.sys, 0);
+        assert_eq!(mbr.logical_partitions[0].ebr_sectors, 6);
+        assert_eq!(mbr.logical_partitions[1].absolute_ebr_lba, 7);
+        assert_eq!(mbr.logical_partitions[1].partition.starting_lba, 2);
+        assert_eq!(mbr.logical_partitions[1].partition.sectors, 1);
+        assert_eq!(mbr.logical_partitions[1].partition.sys, 0x83);
+        assert_eq!(mbr.logical_partitions[1].ebr_sectors, 3);
     }
 }
