@@ -623,6 +623,14 @@ pub struct CHS {
 }
 
 impl CHS {
+    pub fn new(cylinder: u16, head: u8, sector: u8) -> CHS {
+        CHS {
+            cylinder,
+            head,
+            sector,
+        }
+    }
+
     /// Creates an empty CHS addressing (0/0/0).
     ///
     /// ### Remark
@@ -902,6 +910,8 @@ mod tests {
         assert!(mbr.header.partition_4.is_used());
         assert_eq!(mbr.header.partition_4.sys, 0x05);
         assert_eq!(mbr.header.partition_4.starting_lba, 5);
+        assert_eq!(mbr.header.partition_4.first_chs, CHS::new(0, 0, 6));
+        assert_eq!(mbr.header.partition_4.last_chs, CHS::new(0, 0, 20));
         assert_eq!(mbr.header.partition_4.sectors, 15);
         assert_eq!(mbr.len(), 10);
         assert_eq!(mbr.iter().count(), 10);
@@ -913,10 +923,43 @@ mod tests {
             .all(|(_, x)| x.sys == 0x83));
         assert!(mbr.get(10).is_some());
         assert!(mbr.get(11).is_none());
+        assert_eq!(mbr.logical_partitions[0].absolute_ebr_lba, 5);
         assert_eq!(mbr.logical_partitions[0].ebr_sectors, 15);
+        assert_eq!(mbr.logical_partitions[1].absolute_ebr_lba, 7);
         assert_eq!(mbr.logical_partitions[1].ebr_sectors, 3);
+        assert_eq!(mbr.logical_partitions[2].absolute_ebr_lba, 10);
         assert_eq!(mbr.logical_partitions[2].ebr_sectors, 4);
+        // NOTE: this is actually for testing the CHS conversion to and from LBA
+        assert_eq!(
+            mbr.logical_partitions[2].partition.first_chs,
+            CHS::new(0, 0, 12)
+        );
+        assert_eq!(
+            mbr.logical_partitions[2]
+                .partition
+                .first_chs
+                .to_lba(255, 63),
+            mbr.logical_partitions[2].absolute_ebr_lba
+                + mbr.logical_partitions[2].partition.starting_lba
+        );
+        assert_eq!(
+            CHS::from_lba_exact(
+                mbr.logical_partitions[2].absolute_ebr_lba
+                    + mbr.logical_partitions[2].partition.starting_lba,
+                u16::max_value(),
+                255,
+                63
+            )
+            .unwrap(),
+            mbr.logical_partitions[2].partition.first_chs
+        );
+        assert_eq!(mbr.logical_partitions[3].absolute_ebr_lba, 14);
         assert_eq!(mbr.logical_partitions[3].ebr_sectors, 2);
+        assert_eq!(mbr.logical_partitions[4].absolute_ebr_lba, 16);
+        assert_eq!(mbr.logical_partitions[4].ebr_sectors, 2);
+        assert_eq!(mbr.logical_partitions[5].absolute_ebr_lba, 18);
+        assert_eq!(mbr.logical_partitions[5].ebr_sectors, 2);
+        assert!(mbr.logical_partitions.get(6).is_none());
     }
 
     #[test]
