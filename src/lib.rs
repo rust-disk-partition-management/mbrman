@@ -277,13 +277,13 @@ impl MBR {
         self.header.write_into(&mut writer)?;
 
         if let Some(extended) = self.header.get_extended_partition() {
-            for (l, next) in self.logical_partitions.iter().zip(
-                self.logical_partitions
-                    .iter()
-                    .skip(1)
-                    .map(|x| Some(x))
-                    .chain([None].into_iter().copied()),
-            ) {
+            let next_logical_partitions = self
+                .logical_partitions
+                .iter()
+                .skip(1)
+                .map(|x| Some(x))
+                .chain(repeat(None));
+            for (l, next) in self.logical_partitions.iter().zip(next_logical_partitions) {
                 writer.seek(SeekFrom::Start(
                     (l.absolute_ebr_lba * self.sector_size + EBR_BOOTSTRAP_CODE_SIZE) as u64,
                 ))?;
