@@ -905,14 +905,14 @@ mod tests {
     fn read_disk2() {
         let mut mbr = MBR::read_from(&mut File::open(DISK2).unwrap(), 512).unwrap();
         assert!(mbr.header.partition_1.is_used());
-        assert!(mbr.header.partition_2.is_unused());
+        assert!(mbr.header.partition_2.is_used());
         assert!(mbr.header.partition_3.is_unused());
-        assert!(mbr.header.partition_4.is_used());
-        assert_eq!(mbr.header.partition_4.sys, 0x05);
-        assert_eq!(mbr.header.partition_4.starting_lba, 5);
-        assert_eq!(mbr.header.partition_4.first_chs, CHS::new(0, 0, 6));
-        assert_eq!(mbr.header.partition_4.last_chs, CHS::new(0, 0, 20));
-        assert_eq!(mbr.header.partition_4.sectors, 15);
+        assert!(mbr.header.partition_4.is_unused());
+        assert_eq!(mbr.header.partition_2.sys, 0x05);
+        assert_eq!(mbr.header.partition_2.starting_lba, 5);
+        assert_eq!(mbr.header.partition_2.first_chs, CHS::new(0, 1, 3));
+        assert_eq!(mbr.header.partition_2.last_chs, CHS::new(3, 0, 2));
+        assert_eq!(mbr.header.partition_2.sectors, 15);
         assert_eq!(mbr.len(), 10);
         assert_eq!(mbr.iter().count(), 10);
         assert_eq!(mbr.iter_mut().count(), 10);
@@ -932,13 +932,13 @@ mod tests {
         // NOTE: this is actually for testing the CHS conversion to and from LBA
         assert_eq!(
             mbr.logical_partitions[2].partition.first_chs,
-            CHS::new(0, 0, 12)
+            CHS::new(1, 1, 3)
         );
         assert_eq!(
             mbr.logical_partitions[2]
                 .partition
                 .first_chs
-                .to_lba(255, 63),
+                .to_lba(2, 3),
             mbr.logical_partitions[2].absolute_ebr_lba
                 + mbr.logical_partitions[2].partition.starting_lba
         );
@@ -947,8 +947,8 @@ mod tests {
                 mbr.logical_partitions[2].absolute_ebr_lba
                     + mbr.logical_partitions[2].partition.starting_lba,
                 u16::max_value(),
-                255,
-                63
+                2,
+                3
             )
             .unwrap(),
             mbr.logical_partitions[2].partition.first_chs
