@@ -179,6 +179,8 @@ impl MBR {
             //       are ignored.
             let mut relative_ebr_lba = 0;
             let mut ebr_sectors = extended.sectors;
+            let mut ebr_first_chs = extended.first_chs;
+            let mut ebr_last_chs = extended.last_chs;
             loop {
                 reader.seek(SeekFrom::Start(
                     ((extended.starting_lba + relative_ebr_lba) * sector_size
@@ -200,6 +202,8 @@ impl MBR {
                     partition,
                     absolute_ebr_lba: extended.starting_lba + relative_ebr_lba,
                     ebr_sectors,
+                    ebr_first_chs,
+                    ebr_last_chs,
                 });
 
                 if next.starting_lba > 0 && relative_ebr_lba >= next.starting_lba {
@@ -208,6 +212,8 @@ impl MBR {
 
                 relative_ebr_lba = next.starting_lba;
                 ebr_sectors = next.sectors;
+                ebr_first_chs = next.first_chs;
+                ebr_last_chs = next.last_chs;
 
                 if relative_ebr_lba == 0 {
                     break;
@@ -271,24 +277,36 @@ impl MBR {
         self.header.write_into(&mut writer)?;
 
         if let Some(extended) = self.header.get_extended_partition() {
-            let next_absolute_ebr_lbas = self
-                .logical_partitions
-                .iter()
-                .skip(1)
-                .map(|x| (x.absolute_ebr_lba, x.ebr_sectors))
-                .chain([(0_u32, 0_u32)].into_iter().copied());
-            for ((next_absolute_ebr_lba, ebr_sectors), l) in
-                next_absolute_ebr_lbas.zip(self.logical_partitions.iter())
-            {
+            for (l, next) in self.logical_partitions.iter().zip(
+                self.logical_partitions
+                    .iter()
+                    .skip(1)
+                    .map(|x| Some(x))
+                    .chain([None].into_iter().copied()),
+            ) {
                 writer.seek(SeekFrom::Start(
                     (l.absolute_ebr_lba * self.sector_size + EBR_BOOTSTRAP_CODE_SIZE) as u64,
                 ))?;
-                let ebr = EBRHeader::new(
-                    l,
-                    next_absolute_ebr_lba.saturating_sub(extended.starting_lba),
-                    ebr_sectors,
-                );
-                serialize_into(&mut writer, &ebr)?;
+                serialize_into(&mut writer, &l.partition)?;
+                if let Some(next) = next {
+                    serialize_into(
+                        &mut writer,
+                        &MBRPartitionEntry {
+                            boot: false,
+                            first_chs: next.ebr_first_chs,
+                            sys: extended.sys,
+                            last_chs: next.ebr_last_chs,
+                            starting_lba: next
+                                .absolute_ebr_lba
+                                .saturating_sub(extended.starting_lba),
+                            sectors: next.ebr_sectors,
+                        },
+                    )?;
+                } else {
+                    serialize_into(&mut writer, &MBRPartitionEntry::empty())?;
+                }
+                writer.seek(SeekFrom::Current(16 * 2))?;
+                serialize_into(&mut writer, &Signature55AA)?;
             }
         }
 
@@ -452,7 +470,7 @@ impl IndexMut<usize> for MBRHeader {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct EBRHeader {
     partition_1: MBRPartitionEntry,
     partition_2: MBRPartitionEntry,
@@ -471,25 +489,6 @@ impl EBRHeader {
 
     fn unwrap(self) -> (MBRPartitionEntry, MBRPartitionEntry) {
         (self.partition_1, self.partition_2)
-    }
-
-    fn new(l: &LogicalPartition, relative_ebr_lba: u32, ebr_sectors: u32) -> EBRHeader {
-        let partition_2 = MBRPartitionEntry {
-            boot: false,
-            first_chs: CHS::empty(),
-            sys: if relative_ebr_lba > 0 { 0x05 } else { 0 },
-            last_chs: CHS::empty(),
-            starting_lba: relative_ebr_lba,
-            sectors: ebr_sectors,
-        };
-
-        EBRHeader {
-            partition_1: l.partition.clone(),
-            partition_2,
-            unused_partition_3: [0; 16],
-            unused_partition_4: [0; 16],
-            boot_signature: Signature55AA,
-        }
     }
 }
 
@@ -613,6 +612,8 @@ pub struct LogicalPartition {
     pub partition: MBRPartitionEntry,
     pub absolute_ebr_lba: u32,
     pub ebr_sectors: u32,
+    pub ebr_first_chs: CHS,
+    pub ebr_last_chs: CHS,
 }
 
 /// A CHS address (cylinder/head/sector)
@@ -996,6 +997,8 @@ mod tests {
             partition: empty,
             absolute_ebr_lba: 5,
             ebr_sectors: 2,
+            ebr_first_chs: CHS::empty(),
+            ebr_last_chs: CHS::empty(),
         });
         mbr.logical_partitions.push(LogicalPartition {
             partition: MBRPartitionEntry {
@@ -1008,6 +1011,8 @@ mod tests {
             },
             absolute_ebr_lba: 7,
             ebr_sectors: 3,
+            ebr_first_chs: CHS::empty(),
+            ebr_last_chs: CHS::empty(),
         });
 
         // NOTE: don't put this in a loop otherwise it's hard to guess if the error come from
