@@ -46,6 +46,7 @@ pub enum Error {
     InconsistentEBR,
 }
 
+#[derive(Debug, Clone)]
 pub struct MBR {
     /// Sector size of the disk.
     ///
@@ -65,6 +66,14 @@ pub struct MBR {
     /// # Panics
     /// The value must be greater than 0, otherwise you will encounter divisions by zero.
     pub align: u32,
+    /// Disk geometry: number of cylinders
+    pub cylinders: u16,
+    /// Disk geometry: number of heads
+    pub heads: u8,
+    /// Disk geometry: number of sectors
+    pub sectors: u8,
+    /// Disk size in sectors
+    pub disk_size: u32,
 }
 
 impl MBR {
@@ -139,17 +148,28 @@ impl MBR {
     /// # Examples:
     /// Basic usage:
     /// ```
-    /// let mbr = mbrman::MBR::new(512, [0x01, 0x02, 0x03, 0x04])
+    /// let mut f = std::fs::File::open("tests/fixtures/disk1.img")
+    ///     .expect("could not open disk");
+    /// let mbr = mbrman::MBR::new_from(&mut f, 512, [0x01, 0x02, 0x03, 0x04])
     ///     .expect("could not make a partition table");
     /// ```
-    pub fn new(sector_size: u32, disk_signature: [u8; 4]) -> Result<MBR> {
-        let header = MBRHeader::new(disk_signature)?;
+    pub fn new_from<S>(seeker: &mut S, sector_size: u32, disk_signature: [u8; 4]) -> Result<MBR>
+    where
+        S: Seek,
+    {
+        let disk_size = u32::try_from(seeker.seek(SeekFrom::End(0))? / u64::from(sector_size))
+            .unwrap_or_else(|_| u32::max_value());
+        let header = MBRHeader::new(disk_signature);
 
         Ok(MBR {
             sector_size,
             header,
             logical_partitions: Vec::new(),
             align: DEFAULT_ALIGN,
+            cylinders: 0,
+            heads: 0,
+            sectors: 0,
+            disk_size,
         })
     }
 
@@ -168,6 +188,8 @@ impl MBR {
     where
         R: Read + Seek,
     {
+        let disk_size = u32::try_from(reader.seek(SeekFrom::End(0))? / u64::from(sector_size))
+            .unwrap_or_else(|_| u32::max_value());
         let header = MBRHeader::read_from(&mut reader)?;
 
         let mut logical_partitions = Vec::new();
@@ -228,6 +250,10 @@ impl MBR {
             header,
             logical_partitions,
             align,
+            cylinders: 0,
+            heads: 0,
+            sectors: 0,
+            disk_size,
         })
     }
 
@@ -263,7 +289,7 @@ impl MBR {
     /// let ss = 512;
     /// let data = vec![0; 100 * ss as usize];
     /// let mut cur = std::io::Cursor::new(data);
-    /// let mut mbr = mbrman::MBR::new(ss as u32, [0xff; 4])
+    /// let mut mbr = mbrman::MBR::new_from(&mut cur, ss as u32, [0xff; 4])
     ///     .expect("could not make a partition table");
     ///
     /// // actually write:
@@ -311,6 +337,118 @@ impl MBR {
         }
 
         Ok(())
+    }
+
+    /// Get a cylinder size in sectors. This function is useful if you want to
+    /// align your partitions to the cylinder.
+    pub fn get_cylinder_size(&self) -> u32 {
+        u32::from(self.heads) * u32::from(self.sectors)
+    }
+
+    /// Finds the primary partition (ignoring extended partitions) or logical
+    /// partition where the given sector resides.
+    pub fn find_at_sector(&self, sector: u32) -> Option<usize> {
+        let between = |sector, start, len| sector >= start && sector <= start + len - 1;
+
+        let primary = self
+            .header
+            .iter()
+            .find(|(_, x)| x.is_used() && between(sector, x.starting_lba, x.sectors));
+
+        match primary {
+            Some((_, x)) if x.is_extended() => self
+                .logical_partitions
+                .iter()
+                .enumerate()
+                .find(|(_, x)| {
+                    x.partition.is_used()
+                        && between(
+                            sector,
+                            x.absolute_ebr_lba + x.partition.starting_lba,
+                            x.partition.sectors,
+                        )
+                })
+                .map(|(i, _)| 5 + i),
+            Some((i, _)) => Some(i),
+            None => None,
+        }
+    }
+
+    /// Find free spots in the partition table.
+    /// This function will return a vector of tuple with on the left: the starting LBA of the free
+    /// spot; and on the right: the size (in sectors) of the free spot.
+    /// This function will automatically align with the alignment defined in the `MBR`.
+    ///
+    /// # Examples:
+    /// Basic usage:
+    /// ```
+    /// let ss = 512;
+    /// let data = vec![0; 100 * ss as usize];
+    /// let mut cur = std::io::Cursor::new(data);
+    /// let mut mbr = mbrman::MBR::new_from(&mut cur, ss as u32, [0xff; 4])
+    ///     .expect("could not create partition table");
+    ///
+    /// mbr[1] = mbrman::MBRPartitionEntry {
+    ///     boot: false,
+    ///     first_chs: mbrman::CHS::empty(),
+    ///     sys: 0x83,
+    ///     last_chs: mbrman::CHS::empty(),
+    ///     starting_lba: 6,
+    ///     sectors: mbr.disk_size - 11,
+    /// };
+    ///
+    /// // NOTE: align to the sectors, so we can use every last one of them
+    /// // NOTE: this is only for the demonstration purpose, this is not recommended
+    /// mbr.align = 1;
+    ///
+    /// assert_eq!(
+    ///     mbr.find_free_sectors(),
+    ///     vec![(1, 5), (mbr.disk_size - 5, 5)]
+    /// );
+    /// ```
+    pub fn find_free_sectors(&self) -> Vec<(u32, u32)> {
+        assert!(self.align > 0, "align must be greater than 0");
+
+        let collect_free_sectors = |positions: Vec<u32>| {
+            positions
+                .chunks(2)
+                .map(|x| (x[0] + 1, x[1] - x[0] - 1))
+                .filter(|(_, l)| *l > 0)
+                .map(|(i, l)| (i, l, ((i - 1) / self.align + 1) * self.align - i))
+                .map(|(i, l, s)| (i + s, l.saturating_sub(s)))
+                .filter(|(_, l)| *l > 0)
+                .collect::<Vec<_>>()
+        };
+
+        let mut positions = Vec::new();
+        positions.push(0);
+        for (_, partition) in self.header.iter().filter(|(_, x)| x.is_used()) {
+            positions.push(partition.starting_lba);
+            positions.push(partition.starting_lba + partition.sectors - 1);
+        }
+        positions.push(self.disk_size);
+        positions.sort();
+
+        let mut res = collect_free_sectors(positions);
+
+        if let Some(extended) = self.header.get_extended_partition() {
+            let mut positions = Vec::new();
+            positions.push(extended.starting_lba);
+            for l in self
+                .logical_partitions
+                .iter()
+                .filter(|x| x.partition.is_used())
+            {
+                let starting_lba = l.absolute_ebr_lba + l.partition.starting_lba;
+                positions.push(starting_lba);
+                positions.push(starting_lba + l.partition.sectors - 1);
+            }
+            positions.push(extended.starting_lba + extended.sectors);
+            positions.sort();
+            res.extend(collect_free_sectors(positions));
+        }
+
+        res
     }
 }
 
@@ -429,8 +567,8 @@ impl MBRHeader {
     }
 
     /// Make a new MBR header
-    pub fn new(disk_signature: [u8; 4]) -> Result<MBRHeader> {
-        Ok(MBRHeader {
+    pub fn new(disk_signature: [u8; 4]) -> MBRHeader {
+        MBRHeader {
             disk_signature,
             copy_protected: [0x00, 0x00],
             partition_1: MBRPartitionEntry::empty(),
@@ -438,7 +576,7 @@ impl MBRHeader {
             partition_3: MBRPartitionEntry::empty(),
             partition_4: MBRPartitionEntry::empty(),
             boot_signature: Signature55AA,
-        })
+        }
     }
 
     /// Write the MBR header into a writer. This operation will seek at the
@@ -964,7 +1102,7 @@ mod tests {
         let ss = 512_u32;
         let data = vec![0; 10 * ss as usize];
         let mut cur = Cursor::new(data);
-        let mut mbr = MBR::new(ss, [0xff; 4]).unwrap();
+        let mut mbr = MBR::new_from(&mut cur, ss, [0xff; 4]).unwrap();
         mbr.header.partition_1.sys = 0x0f;
         mbr.header.partition_1.starting_lba = 1;
         mbr.header.partition_1.sectors = 10;
@@ -981,9 +1119,9 @@ mod tests {
     #[test]
     fn new_mbr_then_write_then_read_twice() {
         let ss = 512_u32;
-        let data = vec![0; 10 * ss as usize];
+        let data = vec![0; 12 * ss as usize];
         let mut cur = Cursor::new(data);
-        let mut mbr = MBR::new(ss, [0xff; 4]).unwrap();
+        let mut mbr = MBR::new_from(&mut cur, ss, [0xff; 4]).unwrap();
         mbr.header.partition_1.sys = 0x83;
         mbr.header.partition_1.starting_lba = 1;
         mbr.header.partition_1.sectors = 4;
@@ -1052,5 +1190,45 @@ mod tests {
         assert_eq!(mbr.logical_partitions[1].partition.sectors, 1);
         assert_eq!(mbr.logical_partitions[1].partition.sys, 0x83);
         assert_eq!(mbr.logical_partitions[1].ebr_sectors, 3);
+    }
+
+    #[test]
+    fn find_at_sector() {
+        let mbr = MBR::read_from(&mut File::open(DISK2).unwrap(), 512).unwrap();
+        assert_eq!(mbr.find_at_sector(2), Some(1));
+        assert_eq!(mbr.find_at_sector(4), None);
+        assert_eq!(mbr.find_at_sector(8), Some(6));
+        assert_eq!(mbr.find_at_sector(7), None);
+    }
+
+    #[test]
+    fn find_free_sectors() {
+        let ss = 512_u32;
+        let data = vec![0; 10 * ss as usize];
+        let mut cur = Cursor::new(data);
+        let mut mbr = MBR::new_from(&mut cur, ss, [0xff; 4]).unwrap();
+        mbr.align = 1;
+        mbr.header.partition_1.sys = 0x83;
+        mbr.header.partition_1.starting_lba = 1;
+        mbr.header.partition_1.sectors = 1;
+        mbr.header.partition_3.sys = 0x0f;
+        mbr.header.partition_3.starting_lba = 5;
+        mbr.header.partition_3.sectors = 5;
+        mbr.logical_partitions.push(LogicalPartition {
+            partition: MBRPartitionEntry {
+                boot: false,
+                first_chs: CHS::empty(),
+                sys: 0x83,
+                last_chs: CHS::empty(),
+                starting_lba: 2,
+                sectors: 1,
+            },
+            absolute_ebr_lba: 5,
+            ebr_sectors: 3,
+            ebr_first_chs: CHS::empty(),
+            ebr_last_chs: CHS::empty(),
+        });
+
+        assert_eq!(mbr.find_free_sectors(), vec![(2, 3), (6, 1), (8, 2)]);
     }
 }
