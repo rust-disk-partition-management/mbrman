@@ -56,6 +56,9 @@ pub enum Error {
     /// The EBR ends after the extended partition
     #[error(display = "EBR ends after the extended partition")]
     EBREndsAfterExtendedPartition,
+    /// Not enough sectors to create a logical partition
+    #[error(display = "not enough sectors to create a logical partition")]
+    NotEnoughSectorsToCreateLogicalPartition,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -475,6 +478,11 @@ impl MBR {
         res
     }
 
+    /// Push a new logical partition to the end of the extended partition list. This function will
+    /// take care of creating the EBR for you. The EBR will be located at `starting_lba` (provided
+    /// in input) and the logical partition itself will be located a block further to stay
+    /// aligned. The size of the logical partition will be one block smaller than the `sectors`
+    /// provided in input.
     pub fn push(
         &mut self,
         sys: u8,
@@ -488,10 +496,10 @@ impl MBR {
         let cylinder_size = self.get_cylinder_size();
 
         starting_lba = ((starting_lba - 1) / self.align + 1) * self.align;
-        sectors = std::cmp::max(
-            ((sectors - 1) / self.align + 1) * self.align,
-            2 * self.align,
-        );
+        sectors = ((sectors - 1) / self.align + 1) * self.align;
+        if sectors < 2 * self.align {
+            return Err(Error::NotEnoughSectorsToCreateLogicalPartition);
+        }
 
         let last_chs = if self.align == cylinder_size {
             CHS::from_lba_aligned(
@@ -1374,7 +1382,7 @@ mod tests {
         mbr.header.partition_1.last_chs = CHS::new(5, 0, 1);
         mbr.header.partition_1.starting_lba = align;
         mbr.header.partition_1.sectors = mbr.disk_size;
-        let p = mbr.push(0x00, 2, 1).unwrap();
+        let p = mbr.push(0x00, 2, 2 * align).unwrap();
 
         assert_eq!(p.absolute_ebr_lba, align);
         assert_eq!(p.partition.starting_lba, 2 * align);
@@ -1437,7 +1445,7 @@ mod tests {
         mbr.header.partition_1.sys = 0x0f;
         mbr.header.partition_1.starting_lba = 1;
         mbr.header.partition_1.sectors = mbr.disk_size - 1;
-        mbr.push(0x00, 1, 1).unwrap();
+        mbr.push(0x00, 1, 2).unwrap();
         mbr.push(0x83, 4, 3).unwrap();
 
         mbr.logical_partitions.remove(0);
