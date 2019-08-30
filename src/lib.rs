@@ -567,6 +567,21 @@ impl MBR {
 
         Ok(self.logical_partitions.last_mut().unwrap())
     }
+
+    /// Remove a logical partition. This will remove a logical partition in the array.
+    ///
+    /// # Remark
+    ///
+    /// This operation will decrease by one the index of every logical partition after the one that
+    /// has been removed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index` is out of bounds.
+    pub fn remove(&mut self, index: usize) -> LogicalPartition {
+        assert!(index >= 5, "logical partitions start at 5");
+        self.logical_partitions.remove(index - 5)
+    }
 }
 
 impl Index<usize> for MBR {
