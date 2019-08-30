@@ -493,7 +493,6 @@ impl MBR {
             .header
             .get_extended_partition()
             .ok_or(Error::NoExtendedPartition)?;
-        let cylinder_size = self.get_cylinder_size();
 
         starting_lba = ((starting_lba - 1) / self.align + 1) * self.align;
         sectors = ((sectors - 1) / self.align + 1) * self.align;
@@ -501,8 +500,8 @@ impl MBR {
             return Err(Error::NotEnoughSectorsToCreateLogicalPartition);
         }
 
-        let last_chs = if self.align == cylinder_size {
-            CHS::from_lba_aligned(
+        let last_chs = if self.cylinders > 0 {
+            CHS::from_lba_exact(
                 starting_lba + sectors - self.align,
                 self.cylinders,
                 self.heads,
@@ -515,8 +514,8 @@ impl MBR {
         let l = LogicalPartition {
             partition: MBRPartitionEntry {
                 boot: false,
-                first_chs: if self.align == cylinder_size {
-                    CHS::from_lba_aligned(
+                first_chs: if self.cylinders > 0 {
+                    CHS::from_lba_exact(
                         starting_lba + self.align,
                         self.cylinders,
                         self.heads,
@@ -536,7 +535,7 @@ impl MBR {
             } else {
                 Some(sectors)
             },
-            ebr_first_chs: if self.align == cylinder_size {
+            ebr_first_chs: if self.cylinders > 0 {
                 CHS::from_lba_exact(starting_lba, self.cylinders, self.heads, self.sectors)?
             } else {
                 CHS::empty()
