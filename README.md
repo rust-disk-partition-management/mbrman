@@ -28,7 +28,7 @@ A library that allows managing GUID partition tables.
 
 # Examples
 Reading all the partitions of a disk:
-```
+```rust
 let mut f = std::fs::File::open("tests/fixtures/disk1.img")
     .expect("could not open disk");
 let mbr = mbrman::MBR::read_from(&mut f, 512)
@@ -47,7 +47,7 @@ for (i, p) in mbr.iter() {
 }
 ```
 Creating new partitions:
-```
+```rust
 let mut f = std::fs::File::open("tests/fixtures/disk1.img")
     .expect("could not open disk");
 let mut mbr = mbrman::MBR::read_from(&mut f, 512)
@@ -70,7 +70,7 @@ mbr[free_partition_number] = mbrman::MBRPartitionEntry {
 };
 ```
 Creating a new partition table with one entry that fills the entire disk:
-```
+```rust
 let ss = 512;
 let data = vec![0; 100 * ss as usize];
 let mut cur = std::io::Cursor::new(data);
