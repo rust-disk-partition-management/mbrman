@@ -1439,6 +1439,7 @@ impl Serialize for CHS {
 }
 
 #[cfg(test)]
+#[allow(clippy::cognitive_complexity)]
 mod tests {
     use super::*;
     use std::fs::File;
