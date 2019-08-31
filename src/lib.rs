@@ -257,6 +257,11 @@ impl MBR {
         4 + self.logical_partitions.len()
     }
 
+    /// Always false: primary partitions are always counted even if they are empty.
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+
     /// Make a new MBR
     ///
     /// # Examples
@@ -318,10 +323,10 @@ impl MBR {
             let mut ebr_first_chs = extended.first_chs;
             let mut ebr_last_chs = None;
             loop {
-                reader.seek(SeekFrom::Start(
-                    ((extended.starting_lba + relative_ebr_lba) * sector_size
-                        + EBR_BOOTSTRAP_CODE_SIZE) as u64,
-                ))?;
+                reader.seek(SeekFrom::Start(u64::from(
+                    (extended.starting_lba + relative_ebr_lba) * sector_size
+                        + EBR_BOOTSTRAP_CODE_SIZE,
+                )))?;
                 let (partition, next) = match EBRHeader::read_from(&mut reader) {
                     Ok(ebr) => ebr.unwrap(),
                     Err(err) => {
@@ -456,12 +461,12 @@ impl MBR {
                 .logical_partitions
                 .iter()
                 .skip(1)
-                .map(|x| Some(x))
+                .map(Some)
                 .chain(once(None));
             for (l, next) in self.logical_partitions.iter().zip(next_logical_partitions) {
-                writer.seek(SeekFrom::Start(
-                    (l.absolute_ebr_lba * self.sector_size + EBR_BOOTSTRAP_CODE_SIZE) as u64,
-                ))?;
+                writer.seek(SeekFrom::Start(u64::from(
+                    l.absolute_ebr_lba * self.sector_size + EBR_BOOTSTRAP_CODE_SIZE,
+                )))?;
                 serialize_into(
                     &mut writer,
                     &MBRPartitionEntry {
@@ -503,7 +508,7 @@ impl MBR {
     /// Finds the primary partition (ignoring extended partitions) or logical
     /// partition where the given sector resides.
     pub fn find_at_sector(&self, sector: u32) -> Option<usize> {
-        let between = |sector, start, len| sector >= start && sector <= start + len - 1;
+        let between = |sector, start, len| sector >= start && sector < start + len;
 
         let primary = self
             .header
@@ -1339,7 +1344,7 @@ impl CHS {
     }
 
     /// Convert a CHS address to LBA
-    pub fn to_lba(&self, heads: u8, sectors: u8) -> u32 {
+    pub fn to_lba(self, heads: u8, sectors: u8) -> u32 {
         let heads = u32::from(heads);
         let sectors = u32::from(sectors);
         let c = u32::from(self.cylinder);
@@ -1357,13 +1362,13 @@ impl CHS {
     ///
     /// This function does not check if the CHS address is withing range of
     /// possible values for a provided hard disk.
-    pub fn is_empty(&self) -> bool {
+    pub fn is_empty(self) -> bool {
         self.cylinder == 0 && self.head == 0 && self.sector == 0
     }
 
     /// Check if the CHS address is valid and within range of the possible
     /// values for the hard disk geometry provided in argument.
-    pub fn is_valid(&self, cylinders: u16, heads: u8, sectors: u8) -> bool {
+    pub fn is_valid(self, cylinders: u16, heads: u8, sectors: u8) -> bool {
         // NOTE: In CHS addressing the sector numbers always start at 1, there is no sector 0
         //       https://en.wikipedia.org/wiki/Cylinder-head-sector
         self.sector > 0 && self.sector <= sectors && self.head < heads && self.cylinder < cylinders
@@ -1421,7 +1426,7 @@ impl Serialize for CHS {
         let mut bv = BitVec::<BigEndian, u8>::from_element(self.head);
         let mut sector = BitVec::<BigEndian, u8>::from_element(self.sector);
         let mut cylinder = BitVec::<BigEndian, u16>::from_element(self.cylinder);
-        bv.extend(cylinder.drain(..8).into_iter().skip(6));
+        bv.extend(cylinder.drain(..8).skip(6));
         bv.extend(sector.drain(2..));
         bv.extend(cylinder.drain(..));
 
