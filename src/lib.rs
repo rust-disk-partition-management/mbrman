@@ -299,6 +299,17 @@ impl MBR {
             .unwrap()
     }
 
+    /// Return `true` if the MBR has a valid geometry. The geometry can be set by setting
+    /// the fiels `cylinders`, `heads` and `sectors`
+    pub fn check_geometry(&self) -> bool {
+        self.cylinders > 0
+            && self.cylinders <= 1023
+            && self.heads > 0
+            && self.heads <= 255
+            && self.sectors > 0
+            && self.sectors <= 63
+    }
+
     /// Write the MBR to a writer. This function will seek automatically in the writer to write the
     /// primary header and the backup header at their proper location.
     ///
@@ -328,8 +339,10 @@ impl MBR {
                 first.ebr_last_chs = None;
             }
 
-            for l in self.logical_partitions.iter_mut() {
-                l.update_chs(self.cylinders, self.heads, self.sectors)?;
+            if self.check_geometry() {
+                for l in self.logical_partitions.iter_mut() {
+                    l.update_chs(self.cylinders, self.heads, self.sectors)?;
+                }
             }
 
             let next_logical_partitions = self
@@ -543,7 +556,9 @@ impl MBR {
             }
         }
 
-        l.update_chs(self.cylinders, self.heads, self.sectors)?;
+        if self.check_geometry() {
+            l.update_chs(self.cylinders, self.heads, self.sectors)?;
+        }
         self.logical_partitions.push(l);
 
         Ok(self.logical_partitions.last_mut().unwrap())
@@ -883,11 +898,9 @@ pub struct LogicalPartition {
 }
 
 impl LogicalPartition {
-    fn update_chs(&mut self, cylinders: u16, heads: u8, sectors: u8) -> Result<()> {
-        if cylinders == 0 {
-            return Ok(());
-        }
-
+    /// Update the fields `partition.first_chs`, `partition.last_chs`.
+    /// `ebr_first_chs` and `ebr_last_chs` using the disk geometry provided in parameter.
+    pub fn update_chs(&mut self, cylinders: u16, heads: u8, sectors: u8) -> Result<()> {
         self.partition.first_chs =
             CHS::from_lba_exact(self.partition.starting_lba, cylinders, heads, sectors)?;
         self.partition.last_chs = CHS::from_lba_exact(
