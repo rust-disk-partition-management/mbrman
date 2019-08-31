@@ -62,6 +62,9 @@ pub enum Error {
     /// An operation that required to find a partition, was unable to find that partition.
     #[error(display = "partition not found")]
     PartitionNotFound,
+    /// An error that occurs when there is not enough space left on the table to continue.
+    #[error(display = "no space left")]
+    NoSpaceLeft,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -526,6 +529,146 @@ impl MBR {
         }
 
         res
+    }
+
+    /// Find the first place (most on the left) where you could start a new partition of the size
+    /// given in parameter.
+    /// This function will automatically align with the alignment defined in the `MBR`.
+    ///
+    /// # Examples:
+    /// Basic usage:
+    /// ```
+    /// let ss = 512;
+    /// let data = vec![0; 100 * ss as usize];
+    /// let mut cur = std::io::Cursor::new(data);
+    /// let mut mbr = mbrman::MBR::new_from(&mut cur, ss as u32, [0xff; 4])
+    ///     .expect("could not create partition table");
+    ///
+    /// mbr[1] = mbrman::MBRPartitionEntry {
+    ///     boot: false,
+    ///     first_chs: mbrman::CHS::empty(),
+    ///     sys: 0x83,
+    ///     last_chs: mbrman::CHS::empty(),
+    ///     starting_lba: 6,
+    ///     sectors: mbr.disk_size - 6,
+    /// };
+    ///
+    /// // NOTE: align to the sectors, so we can use every last one of them
+    /// // NOTE: this is only for the demonstration purpose, this is not recommended
+    /// mbr.align = 1;
+    ///
+    /// assert_eq!(mbr.find_first_place(5), Some(1));
+    /// ```
+    pub fn find_first_place(&self, size: u32) -> Option<u32> {
+        self.find_free_sectors()
+            .iter()
+            .find(|(_, l)| *l >= size)
+            .map(|(i, _)| *i)
+    }
+
+    /// Find the last place (most on the right) where you could start a new partition of the size
+    /// given in parameter.
+    /// This function will automatically align with the alignment defined in the `MBR`.
+    ///
+    /// # Examples:
+    /// Basic usage:
+    /// ```
+    /// let ss = 512;
+    /// let data = vec![0; 100 * ss as usize];
+    /// let mut cur = std::io::Cursor::new(data);
+    /// let mut mbr = mbrman::MBR::new_from(&mut cur, ss as u32, [0xff; 4])
+    ///     .expect("could not create partition table");
+    ///
+    /// mbr[1] = mbrman::MBRPartitionEntry {
+    ///     boot: false,
+    ///     first_chs: mbrman::CHS::empty(),
+    ///     sys: 0x83,
+    ///     last_chs: mbrman::CHS::empty(),
+    ///     starting_lba: 6,
+    ///     sectors: 5,
+    /// };
+    ///
+    /// // NOTE: align to the sectors, so we can use every last one of them
+    /// // NOTE: this is only for the demonstration purpose, this is not recommended
+    /// mbr.align = 1;
+    ///
+    /// assert_eq!(mbr.find_last_place(5), Some(mbr.disk_size - 5));
+    /// ```
+    pub fn find_last_place(&self, size: u32) -> Option<u32> {
+        self.find_free_sectors()
+            .iter()
+            .filter(|(_, l)| *l >= size)
+            .last()
+            .map(|(i, l)| (i + l - size) / self.align * self.align)
+    }
+
+    /// Find the most optimal place (in the smallest free space) where you could start a new
+    /// partition of the size given in parameter.
+    /// This function will automatically align with the alignment defined in the `MBR`.
+    ///
+    /// # Examples:
+    /// Basic usage:
+    /// ```
+    /// let ss = 512;
+    /// let data = vec![0; 100 * ss as usize];
+    /// let mut cur = std::io::Cursor::new(data);
+    /// let mut mbr = mbrman::MBR::new_from(&mut cur, ss as u32, [0xff; 4])
+    ///     .expect("could not create partition table");
+    ///
+    /// mbr[1] = mbrman::MBRPartitionEntry {
+    ///     boot: false,
+    ///     first_chs: mbrman::CHS::empty(),
+    ///     sys: 0x83,
+    ///     last_chs: mbrman::CHS::empty(),
+    ///     starting_lba: 11,
+    ///     sectors: mbr.disk_size - 11 - 5,
+    /// };
+    ///
+    /// // NOTE: align to the sectors, so we can use every last one of them
+    /// // NOTE: this is only for the demonstration purpose, this is not recommended
+    /// mbr.align = 1;
+    ///
+    /// // NOTE: the space as the end is more optimal because it will allow you to still be able to
+    /// //       insert a bigger partition later
+    /// assert_eq!(mbr.find_optimal_place(5), Some(mbr.disk_size - 5));
+    /// ```
+    pub fn find_optimal_place(&self, size: u32) -> Option<u32> {
+        let mut slots = self
+            .find_free_sectors()
+            .into_iter()
+            .filter(|(_, l)| *l >= size)
+            .collect::<Vec<_>>();
+        slots.sort_by(|(_, l1), (_, l2)| l1.cmp(l2));
+        slots.first().map(|&(i, _)| i)
+    }
+
+    /// Get the maximum size (in sectors) of a partition you could create in the MBR.
+    /// This function will automatically align with the alignment defined in the `MBR`.
+    ///
+    /// # Examples:
+    /// Basic usage:
+    /// ```
+    /// let ss = 512;
+    /// let data = vec![0; 100 * ss as usize];
+    /// let mut cur = std::io::Cursor::new(data);
+    /// let mut mbr = mbrman::MBR::new_from(&mut cur, ss as u32, [0xff; 4])
+    ///     .expect("could not create partition table");
+    ///
+    /// // NOTE: align to the sectors, so we can use every last one of them
+    /// // NOTE: this is only for the demonstration purpose, this is not recommended
+    /// mbr.align = 1;
+    ///
+    /// assert_eq!(
+    ///     mbr.get_maximum_partition_size().unwrap_or(0),
+    ///     mbr.disk_size - 1
+    /// );
+    /// ```
+    pub fn get_maximum_partition_size(&self) -> Result<u32> {
+        self.find_free_sectors()
+            .into_iter()
+            .map(|(_, l)| l / self.align * self.align)
+            .max()
+            .ok_or(Error::NoSpaceLeft)
     }
 
     /// Push a new logical partition to the end of the extended partition list. This function will
