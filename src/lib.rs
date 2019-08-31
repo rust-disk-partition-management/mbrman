@@ -59,6 +59,9 @@ pub enum Error {
     /// Not enough sectors to create a logical partition
     #[error(display = "not enough sectors to create a logical partition")]
     NotEnoughSectorsToCreateLogicalPartition,
+    /// An operation that required to find a partition, was unable to find that partition.
+    #[error(display = "partition not found")]
+    PartitionNotFound,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -416,6 +419,28 @@ impl MBR {
             Some((i, _)) => Some(i),
             None => None,
         }
+    }
+
+    /// Remove a partition entry that resides at a given sector. If the partition is the extended
+    /// partition, it will delete also all the logical partitions.
+    ///
+    /// # Errors
+    /// It is an error to provide a sector which does not belong to a partition.
+    pub fn remove_at_sector(&mut self, sector: u32) -> Result<()> {
+        let i = self
+            .find_at_sector(sector)
+            .ok_or(Error::PartitionNotFound)?;
+
+        if i >= 5 {
+            self.remove(i);
+        } else {
+            if self[i].is_extended() {
+                self.logical_partitions.clear();
+            }
+            self[i] = MBRPartitionEntry::empty();
+        }
+
+        Ok(())
     }
 
     /// Find free spots in the partition table.
