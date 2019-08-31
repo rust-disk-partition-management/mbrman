@@ -1505,13 +1505,13 @@ mod tests {
     fn convert_chs_to_lba_and_back() {
         // NOTE: 2484/16/63 is taken from a real life example of hard disk of 1280MB
         // LBA address 666666 is around 341MB for a sector size of 512 bytes
-        let chs = CHS::from_lba_exact(666666, 2484, 16, 63).unwrap();
-        assert_eq!(chs.to_lba(16, 63), 666666);
+        let chs = CHS::from_lba_exact(666_666, 2484, 16, 63).unwrap();
+        assert_eq!(chs.to_lba(16, 63), 666_666);
 
-        let chs = CHS::from_lba_aligned(666666, 2484, 16, 63).unwrap();
-        assert_eq!(chs.to_lba(16, 63), 667296);
+        let chs = CHS::from_lba_aligned(666_666, 2484, 16, 63).unwrap();
+        assert_eq!(chs.to_lba(16, 63), 667_296);
 
-        let chs = CHS::from_lba_exact(667296, 2484, 16, 63).unwrap();
+        let chs = CHS::from_lba_exact(667_296, 2484, 16, 63).unwrap();
         assert_eq!(chs.head, 0);
         assert_eq!(chs.sector, 1);
     }
