@@ -27,7 +27,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     /// The CHS address requested cannot be represented in CHS
     ///
-    /// ### Remark
+    /// # Remark
     ///
     /// There is a hard limit around 8GB for CHS addressing.
     #[error(display = "exceeded the maximum limit of CHS")]
@@ -122,7 +122,7 @@ impl MBR {
 
     /// Get `Some(&MBRPartitionEntry)` if it exists, None otherwise.
     ///
-    /// ### Remarks
+    /// # Remarks
     ///
     ///  -  The partitions start at index 1
     ///  -  The first 4 partitions always exist
@@ -139,7 +139,7 @@ impl MBR {
 
     /// Get `Some(&mut MBRPartitionEntry)` if it exists, None otherwise.
     ///
-    /// ### Remarks
+    /// # Remarks
     ///
     ///  -  The partitions start at index 1
     ///  -  The first 4 partitions always exist
@@ -163,7 +163,7 @@ impl MBR {
 
     /// Make a new MBR
     ///
-    /// # Examples:
+    /// # Examples
     /// Basic usage:
     /// ```
     /// let mut f = std::fs::File::open("tests/fixtures/disk1.img")
@@ -194,7 +194,7 @@ impl MBR {
     /// Read the MBR on a reader. This function will try to read the backup header if the primary
     /// header could not be read.
     ///
-    /// # Examples:
+    /// # Examples
     /// Basic usage:
     /// ```
     /// let mut f = std::fs::File::open("tests/fixtures/disk1.img")
@@ -303,20 +303,28 @@ impl MBR {
     }
 
     /// Return `true` if the MBR has a valid geometry. The geometry can be set by setting
-    /// the fiels `cylinders`, `heads` and `sectors`
+    /// the fiels `cylinders`, `heads` and `sectors`.
+    ///
+    /// Remarks
+    ///
+    /// The cylinders, heads and sectors must have a value greater than zero.
+    ///
+    /// The cylinders cannot exceed 1023.
+    ///
+    /// The sectors cannot exceed 63.
     pub fn check_geometry(&self) -> bool {
         self.cylinders > 0
             && self.cylinders <= 1023
             && self.heads > 0
-            && self.heads <= 255
             && self.sectors > 0
             && self.sectors <= 63
     }
 
-    /// Write the MBR to a writer. This function will seek automatically in the writer to write the
-    /// primary header and the backup header at their proper location.
+    /// Write the MBR to a writer. This function will seek automatically in the writer.
+    /// This function will update the CHS address of the partitions automatically if a valid
+    /// geometry has been set. See `check_geometry`.
     ///
-    /// # Examples:
+    /// # Examples
     /// Basic usage:
     /// ```
     /// let ss = 512;
@@ -448,7 +456,7 @@ impl MBR {
     /// spot; and on the right: the size (in sectors) of the free spot.
     /// This function will automatically align with the alignment defined in the `MBR`.
     ///
-    /// # Examples:
+    /// # Examples
     /// Basic usage:
     /// ```
     /// let ss = 512;
@@ -644,7 +652,7 @@ impl MBRHeader {
 
     /// Get `Some(&MBRPartitionEntry)` if it exists, None otherwise.
     ///
-    /// ### Remarks
+    /// # Remarks
     ///
     ///  -  The partitions start at index 1
     ///  -  The first 4 partitions always exist
@@ -661,7 +669,7 @@ impl MBRHeader {
 
     /// Get `Some(&mut MBRPartitionEntry)` if it exists, None otherwise.
     ///
-    /// ### Remarks
+    /// # Remarks
     ///
     ///  -  The partitions start at index 1
     ///  -  The first 4 partitions always exist
@@ -904,19 +912,19 @@ pub struct LogicalPartition {
     pub absolute_ebr_lba: u32,
     /// Number of sectors in the EBR
     ///
-    /// ### Remark
+    /// # Remark
     ///
     /// This information is known for all the EBR except the first logical partition
     pub ebr_sectors: Option<u32>,
     /// CHS address of the EBR header
     ///
-    /// ### Remark
+    /// # Remark
     ///
     /// This information is copied from the extended partition for the first logical partition
     pub ebr_first_chs: CHS,
     /// CHS address of the last sector of the extended partition in the EBR header
     ///
-    /// ### Remark
+    /// # Remark
     ///
     /// This information is known for all the EBR except the first logical partition
     pub ebr_last_chs: Option<CHS>,
@@ -969,7 +977,7 @@ impl CHS {
 
     /// Creates an empty CHS addressing (0/0/0).
     ///
-    /// ### Remark
+    /// # Remark
     ///
     /// This is what you need on recent hardware because CHS is never used.
     pub fn empty() -> CHS {
@@ -983,7 +991,7 @@ impl CHS {
     /// Creates a CHS address calculated from the number of cylinders, heads
     /// and sectors per track of the hard disk.
     ///
-    /// ### Remarks
+    /// # Remarks
     ///
     ///  *  You probably don't need to do this at all! This is only useful if you
     ///     intend to use partitions that use the CHS addressing. Check the column
@@ -1060,7 +1068,7 @@ impl CHS {
 
     /// Check if the CHS address is empty
     ///
-    /// ### Remark
+    /// # Remark
     ///
     /// This function does not check if the CHS address is withing range of
     /// possible values for a provided hard disk.
