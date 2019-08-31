@@ -1,3 +1,68 @@
+//! A library that allows managing GUID partition tables.
+//!
+//! # Examples
+//! Reading all the partitions of a disk:
+//! ```
+//! let mut f = std::fs::File::open("tests/fixtures/disk1.img")
+//!     .expect("could not open disk");
+//! let mbr = mbrman::MBR::read_from(&mut f, 512)
+//!     .expect("could not find MBR");
+//!
+//! println!("Disk signature: {:?}", mbr.header.disk_signature);
+//!
+//! for (i, p) in mbr.iter() {
+//!     if p.is_used() {
+//!         println!("Partition #{}: type = {:?}, size = {} bytes, starting lba = {}",
+//!             i,
+//!             p.sys,
+//!             p.sectors * mbr.sector_size,
+//!             p.starting_lba);
+//!     }
+//! }
+//! ```
+//! Creating new partitions:
+//! ```
+//! let mut f = std::fs::File::open("tests/fixtures/disk1.img")
+//!     .expect("could not open disk");
+//! let mut mbr = mbrman::MBR::read_from(&mut f, 512)
+//!     .expect("could not find MBR");
+//!
+//! let free_partition_number = mbr.iter().find(|(i, p)| p.is_unused()).map(|(i, _)| i)
+//!     .expect("no more places available");
+//! let sectors = mbr.get_maximum_partition_size()
+//!     .expect("no more space available");
+//! let starting_lba = mbr.find_optimal_place(sectors)
+//!     .expect("could not find a place to put the partition");
+//!
+//! mbr[free_partition_number] = mbrman::MBRPartitionEntry {
+//!     boot: false,
+//!     first_chs: mbrman::CHS::empty(),
+//!     sys: 0x83,
+//!     last_chs: mbrman::CHS::empty(),
+//!     starting_lba,
+//!     sectors,
+//! };
+//! ```
+//! Creating a new partition table with one entry that fills the entire disk:
+//! ```
+//! let ss = 512;
+//! let data = vec![0; 100 * ss as usize];
+//! let mut cur = std::io::Cursor::new(data);
+//! let mut mbr = mbrman::MBR::new_from(&mut cur, ss as u32, [0xff; 4])
+//!     .expect("could not create partition table");
+//!
+//! mbr[1] = mbrman::MBRPartitionEntry {
+//!     boot: false,
+//!     first_chs: mbrman::CHS::empty(),
+//!     sys: 0x83,
+//!     last_chs: mbrman::CHS::empty(),
+//!     starting_lba: 1,
+//!     sectors: mbr.disk_size - 1,
+//! };
+//! ```
+
+#![deny(missing_docs)]
+
 #[macro_use]
 extern crate serde_derive;
 #[macro_use]
@@ -67,6 +132,29 @@ pub enum Error {
     NoSpaceLeft,
 }
 
+/// A type representing a MBR partition table including its partition, the sector size of the disk
+/// and the alignment of the partitions to the sectors.
+///
+/// # Examples:
+/// Read an existing MBR on a reader and list its partitions:
+/// ```
+/// let mut f = std::fs::File::open("tests/fixtures/disk1.img")
+///     .expect("could not open disk");
+/// let mbr = mbrman::MBR::read_from(&mut f, 512)
+///     .expect("could not find MBR");
+///
+/// println!("Disk signature: {:?}", mbr.header.disk_signature);
+///
+/// for (i, p) in mbr.iter() {
+///     if p.is_used() {
+///         println!("Partition #{}: type = {:?}, size = {} bytes, starting lba = {}",
+///             i,
+///             p.sys,
+///             p.sectors * mbr.sector_size,
+///             p.starting_lba);
+///     }
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct MBR {
     /// Sector size of the disk.
@@ -160,6 +248,11 @@ impl MBR {
         }
     }
 
+    /// The total number of partitions on the disk: primary partitions and logical partitions.
+    ///
+    /// # Remark
+    ///
+    /// The primary partitions are always counted even if they are empty.
     pub fn len(&self) -> usize {
         4 + self.logical_partitions.len()
     }
@@ -772,14 +865,22 @@ impl IndexMut<usize> for MBR {
     }
 }
 
+/// An MBR partition table header
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct MBRHeader {
+    /// 32-bit disk signature
     pub disk_signature: [u8; 4],
+    /// `[0x5a, 0x5a]` if protected, `[0x00, 0x00]` if not
     pub copy_protected: [u8; 2],
+    /// Partition 1
     pub partition_1: MBRPartitionEntry,
+    /// Partition 2
     pub partition_2: MBRPartitionEntry,
+    /// Partition 3
     pub partition_3: MBRPartitionEntry,
+    /// Partition 4
     pub partition_4: MBRPartitionEntry,
+    /// Boot signature
     pub boot_signature: Signature55AA,
 }
 
@@ -936,6 +1037,7 @@ impl EBRHeader {
 
 macro_rules! signature {
     ($name:ident, $n:expr, $bytes:expr, $visitor:ident) => {
+        /// A specific signature
         #[derive(Clone, PartialEq)]
         pub struct $name;
 
@@ -1008,15 +1110,37 @@ signature!(Signature55AA, 2, &[0x55, 0xaa], Signature55AAVisitor);
 /// An MBR partition entry
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct MBRPartitionEntry {
+    /// Boot flag
     pub boot: bool,
+    /// CHS address of the first sector in the partition
     pub first_chs: CHS,
+    /// Partition type (file system ID)
     pub sys: u8,
+    /// CHS address of the last sector in the partition
     pub last_chs: CHS,
+    /// Starting LBA of the partition
     pub starting_lba: u32,
+    /// Number of sectors allocated to the partition
     pub sectors: u32,
 }
 
 impl MBRPartitionEntry {
+    /// Creates an empty partition entry
+    ///
+    /// # Examples
+    /// Basic usage:
+    /// ```
+    /// let ss = 512;
+    /// let data = vec![0; 100 * ss as usize];
+    /// let mut cur = std::io::Cursor::new(data);
+    /// let mut mbr = mbrman::MBR::new_from(&mut cur, ss as u32, [0xff; 4])
+    ///     .expect("could not create partition table");
+    ///
+    /// mbr[1] = mbrman::MBRPartitionEntry::empty();
+    ///
+    /// // NOTE: an empty partition entry is considered as not allocated
+    /// assert!(mbr[1].is_unused());
+    /// ```
     pub fn empty() -> MBRPartitionEntry {
         MBRPartitionEntry {
             boot: false,
@@ -1028,16 +1152,23 @@ impl MBRPartitionEntry {
         }
     }
 
+    /// Returns `true` if the partition entry is used (type (sys) != 0)
     pub fn is_used(&self) -> bool {
         self.sys > 0
     }
 
+    /// Returns `true` if the partition entry is not used (type (sys) == 0)
     pub fn is_unused(&self) -> bool {
         !self.is_used()
     }
 
+    /// Returns `true` if the partition is an extended type partition
     pub fn is_extended(&self) -> bool {
-        self.sys == 0x05 || self.sys == 0x0f || self.sys == 0x85
+        self.sys == 0x05
+            || self.sys == 0x0f
+            || self.sys == 0x85
+            || self.sys == 0xc5
+            || self.sys == 0xd5
     }
 
     /// Read a partition entry from the reader at the current position.
@@ -1049,9 +1180,12 @@ impl MBRPartitionEntry {
     }
 }
 
+/// An abstraction struct for a logical partition
 #[derive(Debug, Clone, PartialEq)]
 pub struct LogicalPartition {
+    /// MBR partition entry of the logical partition
     pub partition: MBRPartitionEntry,
+    /// Absolute LBA of the EBR partition table
     pub absolute_ebr_lba: u32,
     /// Number of sectors in the EBR
     ///
@@ -1104,12 +1238,20 @@ impl LogicalPartition {
 /// A CHS address (cylinder/head/sector)
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct CHS {
+    /// Cylinder
     pub cylinder: u16,
+    /// Head
     pub head: u8,
+    /// Sector
     pub sector: u8,
 }
 
 impl CHS {
+    /// Creates a new CHS address based on input parameters.
+    ///
+    /// # Remark
+    ///
+    /// The values entered in input are not checked.
     pub fn new(cylinder: u16, head: u8, sector: u8) -> CHS {
         CHS {
             cylinder,
