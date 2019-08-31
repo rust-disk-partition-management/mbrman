@@ -328,6 +328,10 @@ impl MBR {
                 first.ebr_last_chs = None;
             }
 
+            for l in self.logical_partitions.iter_mut() {
+                l.update_chs(self.cylinders, self.heads, self.sectors)?;
+            }
+
             let next_logical_partitions = self
                 .logical_partitions
                 .iter()
@@ -500,32 +504,12 @@ impl MBR {
             return Err(Error::NotEnoughSectorsToCreateLogicalPartition);
         }
 
-        let last_chs = if self.cylinders > 0 {
-            CHS::from_lba_exact(
-                starting_lba + sectors - self.align,
-                self.cylinders,
-                self.heads,
-                self.sectors,
-            )?
-        } else {
-            CHS::empty()
-        };
-
-        let l = LogicalPartition {
+        let mut l = LogicalPartition {
             partition: MBRPartitionEntry {
                 boot: false,
-                first_chs: if self.cylinders > 0 {
-                    CHS::from_lba_exact(
-                        starting_lba + self.align,
-                        self.cylinders,
-                        self.heads,
-                        self.sectors,
-                    )?
-                } else {
-                    CHS::empty()
-                },
+                first_chs: CHS::empty(),
                 sys,
-                last_chs,
+                last_chs: CHS::empty(),
                 starting_lba: starting_lba + self.align,
                 sectors: sectors - self.align,
             },
@@ -535,15 +519,11 @@ impl MBR {
             } else {
                 Some(sectors)
             },
-            ebr_first_chs: if self.cylinders > 0 {
-                CHS::from_lba_exact(starting_lba, self.cylinders, self.heads, self.sectors)?
-            } else {
-                CHS::empty()
-            },
+            ebr_first_chs: CHS::empty(),
             ebr_last_chs: if self.logical_partitions.is_empty() {
                 None
             } else {
-                Some(last_chs)
+                Some(CHS::empty())
             },
         };
 
@@ -563,6 +543,7 @@ impl MBR {
             }
         }
 
+        l.update_chs(self.cylinders, self.heads, self.sectors)?;
         self.logical_partitions.push(l);
 
         Ok(self.logical_partitions.last_mut().unwrap())
@@ -901,7 +882,35 @@ pub struct LogicalPartition {
     pub ebr_last_chs: Option<CHS>,
 }
 
-impl LogicalPartition {}
+impl LogicalPartition {
+    fn update_chs(&mut self, cylinders: u16, heads: u8, sectors: u8) -> Result<()> {
+        if cylinders == 0 {
+            return Ok(());
+        }
+
+        self.partition.first_chs =
+            CHS::from_lba_exact(self.partition.starting_lba, cylinders, heads, sectors)?;
+        self.partition.last_chs = CHS::from_lba_exact(
+            self.partition.starting_lba + self.partition.sectors - 1,
+            cylinders,
+            heads,
+            sectors,
+        )?;
+        self.ebr_first_chs = CHS::from_lba_exact(self.absolute_ebr_lba, cylinders, heads, sectors)?;
+        self.ebr_last_chs = if let Some(ebr_sectors) = self.ebr_sectors {
+            Some(CHS::from_lba_exact(
+                self.absolute_ebr_lba + ebr_sectors - 1,
+                cylinders,
+                heads,
+                sectors,
+            )?)
+        } else {
+            None
+        };
+
+        Ok(())
+    }
+}
 
 /// A CHS address (cylinder/head/sector)
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -1405,7 +1414,7 @@ mod tests {
         assert_eq!(p.ebr_first_chs, CHS::new(1, 0, 1));
         assert_eq!(p.ebr_last_chs, None);
         assert_eq!(p.partition.first_chs, CHS::new(2, 0, 1));
-        assert_eq!(p.partition.last_chs, CHS::new(2, 0, 1));
+        assert_eq!(p.partition.last_chs, CHS::new(2, 2, 3));
 
         let p = mbr
             .push(
@@ -1420,9 +1429,9 @@ mod tests {
         assert_eq!(p.ebr_sectors, Some(align * 3));
         assert_eq!(p.partition.sectors, align * 2);
         assert_eq!(p.ebr_first_chs, CHS::new(3, 0, 1));
-        assert_eq!(p.ebr_last_chs, Some(CHS::new(5, 0, 1)));
+        assert_eq!(p.ebr_last_chs, Some(CHS::new(5, 2, 3)));
         assert_eq!(p.partition.first_chs, CHS::new(4, 0, 1));
-        assert_eq!(p.partition.last_chs, CHS::new(5, 0, 1));
+        assert_eq!(p.partition.last_chs, CHS::new(5, 2, 3));
 
         mbr.write_into(&mut cur).unwrap();
         let mut same_mbr = MBR::read_from(&mut cur, ss).unwrap();
