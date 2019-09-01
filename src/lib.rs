@@ -1049,10 +1049,16 @@ macro_rules! bytes_blob {
         #[derive(Clone)]
         pub struct $name(pub [u8; $n]);
 
+        impl Default for $name {
+            fn default() -> Self {
+                Self([0; $n])
+            }
+        }
+
         impl $name {
             /// Create a new empty blob of bytes
-            pub fn new() -> $name {
-                $name([0; $n])
+            pub fn new() -> Self {
+                Self::default()
             }
 
             /// Extracts a slice containing the bootstrap code.
