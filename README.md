@@ -18,7 +18,7 @@ Library:
 Cargo.toml:
 ```toml
 [dependencies]
-mbrman = { version = "0.1.0", default-features = false }
+mbrman = { version = "0.3.1", default-features = false }
 ```
 
 Library Usage
