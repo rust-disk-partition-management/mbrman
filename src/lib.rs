@@ -1385,14 +1385,6 @@ impl MBRPartitionEntry {
             || self.sys == 0xc5
             || self.sys == 0xd5
     }
-
-    /// Read a partition entry from the reader at the current position.
-    pub fn read_from<R: ?Sized>(mut reader: &mut R) -> bincode::Result<MBRPartitionEntry>
-    where
-        R: Read,
-    {
-        deserialize_from(&mut reader)
-    }
 }
 
 /// An abstraction struct for a logical partition
