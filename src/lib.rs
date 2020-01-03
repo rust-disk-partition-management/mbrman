@@ -1,4 +1,4 @@
-//! A library that allows managing GUID partition tables.
+//! A library that allows managing MBR partition tables.
 //!
 //! # Examples
 //! Reading all the partitions of a disk:
