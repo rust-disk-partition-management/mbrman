@@ -36,7 +36,7 @@ A library that allows managing MBR partition tables.
 
 ## Examples
 
-### Reading all the partitions of a disk:
+### Read all the partitions of a disk
 
 ```rust
 let mut f = std::fs::File::open("tests/fixtures/disk1.img")
@@ -87,7 +87,7 @@ mbr[free_partition_number] = mbrman::MBRPartitionEntry::empty();
 // NOTE: no modification is committed to the disk until we call mbr.write_into()
 ```
 
-### Creating a new partition table from an empty disk
+### Create a new partition table from an empty disk
 
 ```rust
 let ss = 512; // sector size
@@ -101,7 +101,7 @@ let mut mbr = mbrman::MBR::new_from(&mut cur, ss as u32, [0xff; 4])
 mbr.write_into(&mut cur);
 ```
 
-### Adding a new logical volume to the disk
+### Add a new logical volume to the disk
 
 ```rust
 let ss = 512; // sector size
@@ -120,14 +120,15 @@ mbr[1] = mbrman::MBRPartitionEntry {
     sectors: mbr.disk_size - 1,         // the number of sectors in that partition
 };
 
-// NOTE: this is a helper function that will do all the hard work for you
+// this helper function will do all the hard work for you
+// here it creates a logical volume with Linux filesystem that occupy the entire disk
 mbr.push(0x83, 1, mbr.disk_size - 1);
 
 // NOTE: commit the change to the in-memory buffer
 mbr.write_into(&mut cur);
 ```
 
-### Adding a new logical volume manually to the disk
+### Add a new logical volume manually to the disk
 
 This is useful only if you need to specify exactly where goes the EBR and the partition itself.
 
