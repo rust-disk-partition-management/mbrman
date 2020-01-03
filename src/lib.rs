@@ -95,7 +95,8 @@
 //! };
 //!
 //! // this helper function will do all the hard work for you
-//! // here it creates a logical volume with Linux filesystem that occupy the entire disk
+//! // here it creates a logical volume with Linux filesystem that occupies the entire disk
+//! // NOTE: you will lose 1 sector because it is used by the EBR
 //! mbr.push(0x83, 1, mbr.disk_size - 1);
 //!
 //! // NOTE: commit the change to the in-memory buffer
