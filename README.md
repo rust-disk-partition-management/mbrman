@@ -10,17 +10,6 @@ mbrman
 
 MBR Partition Management in Rust
 
-Installation
-------------
-
-Library:
-
-Cargo.toml:
-```toml
-[dependencies]
-mbrman = { version = "0.3.1", default-features = false }
-```
-
 Library Usage
 -------------
 
