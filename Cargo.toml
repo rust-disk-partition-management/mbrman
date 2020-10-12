@@ -17,6 +17,5 @@ categories = []
 [dependencies]
 bitvec = "0.19"
 bincode = "1.0.1"
-serde_derive = "1.0.83"
-serde = "1.0.83"
+serde = { version = "1.0.116", features = ["derive"] }
 derive-error = "0.0.4"

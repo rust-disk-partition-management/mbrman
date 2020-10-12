@@ -157,15 +157,14 @@
 #![deny(missing_docs)]
 
 #[macro_use]
-extern crate serde_derive;
-#[macro_use]
 extern crate derive_error;
 
 use bincode::{deserialize_from, serialize_into};
 use bitvec::prelude::*;
 use serde::de;
-use serde::de::{Deserialize, Deserializer, SeqAccess, Visitor};
-use serde::ser::{Serialize, SerializeTuple, Serializer};
+use serde::de::{SeqAccess, Visitor};
+use serde::ser::SerializeTuple;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::convert::TryFrom;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::iter::{once, repeat};
