@@ -697,7 +697,7 @@ impl MBR {
             positions.push(partition.starting_lba + partition.sectors - 1);
         }
         positions.push(self.disk_size);
-        positions.sort();
+        positions.sort_unstable();
 
         let mut res = collect_free_sectors(positions);
 
@@ -714,7 +714,7 @@ impl MBR {
                 positions.push(starting_lba + l.partition.sectors - 1);
             }
             positions.push(extended.starting_lba + extended.sectors);
-            positions.sort();
+            positions.sort_unstable();
             res.extend(collect_free_sectors(positions));
         }
 
