@@ -1,4 +1,4 @@
-[![Build Status](https://travis-ci.org/cecton/mbrman.svg?branch=master)](https://travis-ci.org/cecton/mbrman)
+![Rust](https://github.com/cecton/mbrman/workflows/Rust/badge.svg)
 [![Latest Version](https://img.shields.io/crates/v/mbrman.svg)](https://crates.io/crates/mbrman)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](http://opensource.org/licenses/MIT)
 [![Docs.rs](https://docs.rs/mbrman/badge.svg)](https://docs.rs/mbrman)
