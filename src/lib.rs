@@ -1594,14 +1594,14 @@ impl<'de> Visitor<'de> for CHSVisitor {
     where
         A: SeqAccess<'de>,
     {
-        let head = BitVec::<Msb0, u8>::from_element(seq.next_element::<u8>()?.unwrap());
-        let mut bv = BitVec::<Msb0, u8>::from_element(seq.next_element::<u8>()?.unwrap());
+        let head = BitVec::<Msb0, u8>::from_vec(vec![seq.next_element::<u8>()?.unwrap()]);
+        let mut bv = BitVec::<Msb0, u8>::from_vec(vec![seq.next_element::<u8>()?.unwrap()]);
         let mut cylinder = BitVec::<Msb0, u16>::with_capacity(10);
         cylinder.extend(repeat(false).take(6));
         cylinder.extend(bv.drain(..2));
-        cylinder.extend(BitVec::<Msb0, u8>::from_element(
-            seq.next_element::<u8>()?.unwrap(),
-        ));
+        cylinder.extend(BitVec::<Msb0, u8>::from_vec(vec![seq
+            .next_element::<u8>()?
+            .unwrap()]));
         let mut sector = BitVec::<Msb0, u8>::with_capacity(8);
         sector.push(false);
         sector.push(false);
@@ -1629,9 +1629,9 @@ impl Serialize for CHS {
     where
         S: Serializer,
     {
-        let mut bv = BitVec::<Msb0, u8>::from_element(self.head);
-        let mut sector = BitVec::<Msb0, u8>::from_element(self.sector);
-        let mut cylinder = BitVec::<Msb0, u16>::from_element(self.cylinder);
+        let mut bv = BitVec::<Msb0, u8>::from_vec(vec![self.head]);
+        let mut sector = BitVec::<Msb0, u8>::from_vec(vec![self.sector]);
+        let mut cylinder = BitVec::<Msb0, u16>::from_vec(vec![self.cylinder]);
         bv.extend(cylinder.drain(..8).skip(6));
         bv.extend(sector.drain(2..));
         bv.extend(cylinder.drain(..));

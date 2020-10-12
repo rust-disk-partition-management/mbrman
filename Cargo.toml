@@ -20,7 +20,7 @@ is-it-maintained-issue-resolution = { repository = "cecton/mbrman" }
 is-it-maintained-open-issues = { repository = "cecton/mbrman" }
 
 [dependencies]
-bitvec = "0.17"
+bitvec = "0.19"
 bincode = "1.0.1"
 serde_derive = "1.0.83"
 serde = "1.0.83"
