@@ -1,6 +1,6 @@
 ![Rust](https://github.com/cecton/mbrman/workflows/Rust/badge.svg)
 [![Latest Version](https://img.shields.io/crates/v/mbrman.svg)](https://crates.io/crates/mbrman)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](http://opensource.org/licenses/MIT)
+![License](https://img.shields.io/crates/l/mbrman)
 [![Docs.rs](https://docs.rs/mbrman/badge.svg)](https://docs.rs/mbrman)
 [![LOC](https://tokei.rs/b1/github/cecton/mbrman)](https://github.com/cecton/mbrman)
 [![Dependency Status](https://deps.rs/repo/github/cecton/mbrman/status.svg)](https://deps.rs/repo/github/cecton/mbrman)
