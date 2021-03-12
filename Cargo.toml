@@ -19,4 +19,4 @@ include = ["src/**/*.rs", "tests/fixtures/*.img", "README.md", "LICENSE.Apache-2
 bitvec = "0.19"
 bincode = "1.0.1"
 serde = { version = "1.0.116", features = ["derive"] }
-derive-error = "0.0.4"
+thiserror = "1.0"
