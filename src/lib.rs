@@ -156,9 +156,6 @@
 
 #![deny(missing_docs)]
 
-#[macro_use]
-extern crate derive_error;
-
 use bincode::{deserialize_from, serialize_into};
 use bitvec::prelude::*;
 use serde::de;
@@ -169,6 +166,7 @@ use std::convert::TryFrom;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::iter::{once, repeat};
 use std::ops::{Index, IndexMut};
+use thiserror::Error;
 
 const DEFAULT_ALIGN: u32 = 2048;
 const MAX_ALIGN: u32 = 16384;
@@ -185,40 +183,40 @@ pub enum Error {
     /// # Remark
     ///
     /// There is a hard limit around 8GB for CHS addressing.
-    #[error(display = "exceeded the maximum limit of CHS")]
+    #[error("exceeded the maximum limit of CHS")]
     LBAExceedsMaximumCHS,
     /// The CHS address requested exceeds the number of cylinders in the disk
-    #[error(display = "exceeded the maximum number of cylinders on disk")]
+    #[error("exceeded the maximum number of cylinders on disk")]
     LBAExceedsMaximumCylinders,
     /// Derialization errors.
-    #[error(display = "deserialization failed")]
-    Deserialize(#[error(cause)] bincode::Error),
+    #[error("deserialization failed")]
+    Deserialize(#[from] bincode::Error),
     /// I/O errors.
-    #[error(display = "generic I/O error")]
-    Io(#[error(cause)] std::io::Error),
+    #[error("generic I/O error")]
+    Io(#[from] std::io::Error),
     /// Inconsistent extended boot record
-    #[error(display = "inconsistent extended boot record")]
+    #[error("inconsistent extended boot record")]
     InconsistentEBR,
     /// No extended partition
-    #[error(display = "no extended partition")]
+    #[error("no extended partition")]
     NoExtendedPartition,
     /// The EBR starts before the extended partition
-    #[error(display = "EBR starts before the extended partition")]
+    #[error("EBR starts before the extended partition")]
     EBRStartsBeforeExtendedPartition,
     /// The EBR starts too close to the extended partition
-    #[error(display = "EBR starts too close to the end of the extended partition")]
+    #[error("EBR starts too close to the end of the extended partition")]
     EBRStartsTooCloseToTheEndOfExtendedPartition,
     /// The EBR ends after the extended partition
-    #[error(display = "EBR ends after the extended partition")]
+    #[error("EBR ends after the extended partition")]
     EBREndsAfterExtendedPartition,
     /// Not enough sectors to create a logical partition
-    #[error(display = "not enough sectors to create a logical partition")]
+    #[error("not enough sectors to create a logical partition")]
     NotEnoughSectorsToCreateLogicalPartition,
     /// An operation that required to find a partition, was unable to find that partition.
-    #[error(display = "partition not found")]
+    #[error("partition not found")]
     PartitionNotFound,
     /// An error that occurs when there is not enough space left on the table to continue.
-    #[error(display = "no space left")]
+    #[error("no space left")]
     NoSpaceLeft,
 }
 
