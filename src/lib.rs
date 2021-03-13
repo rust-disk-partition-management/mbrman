@@ -188,7 +188,7 @@ pub enum Error {
     /// The CHS address requested exceeds the number of cylinders in the disk
     #[error("exceeded the maximum number of cylinders on disk")]
     LBAExceedsMaximumCylinders,
-    /// Derialization errors.
+    /// Deserialization errors.
     #[error("deserialization failed")]
     Deserialize(#[from] bincode::Error),
     /// I/O errors.
