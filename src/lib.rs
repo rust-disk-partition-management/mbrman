@@ -1605,9 +1605,9 @@ impl<'de> Visitor<'de> for CHSVisitor {
         sector.extend(bv.drain(..));
 
         Ok(CHS {
-            cylinder: cylinder.as_slice()[0],
-            head: head.as_slice()[0],
-            sector: sector.as_slice()[0],
+            cylinder: cylinder.as_raw_slice()[0],
+            head: head.as_raw_slice()[0],
+            sector: sector.as_raw_slice()[0],
         })
     }
 }
@@ -1634,7 +1634,7 @@ impl Serialize for CHS {
         bv.extend(cylinder.drain(..));
 
         let mut seq = serializer.serialize_tuple(3)?;
-        for x in bv.as_slice() {
+        for x in bv.as_raw_slice() {
             seq.serialize_element(&x)?;
         }
         seq.end()
