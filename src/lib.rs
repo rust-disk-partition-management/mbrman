@@ -687,8 +687,7 @@ impl MBR {
                 .collect::<Vec<_>>()
         };
 
-        let mut positions = Vec::new();
-        positions.push(0);
+        let mut positions = vec![0];
         for (_, partition) in self.header.iter().filter(|(_, x)| x.is_used()) {
             positions.push(partition.starting_lba);
             positions.push(partition.starting_lba + partition.sectors - 1);
@@ -699,8 +698,7 @@ impl MBR {
         let mut res = collect_free_sectors(positions);
 
         if let Some(extended) = self.header.get_extended_partition() {
-            let mut positions = Vec::new();
-            positions.push(extended.starting_lba);
+            let mut positions = vec![extended.starting_lba];
             for l in self
                 .logical_partitions
                 .iter()
