@@ -1115,9 +1115,9 @@ struct EBRHeader {
     bootstrap_code: BootstrapCode446,
     partition_1: MBRPartitionEntry,
     partition_2: MBRPartitionEntry,
-    unused_partition_3: [u8; 16],
-    unused_partition_4: [u8; 16],
-    boot_signature: Signature55AA,
+    _unused_partition_3: [u8; 16],
+    _unused_partition_4: [u8; 16],
+    _boot_signature: Signature55AA,
 }
 
 impl EBRHeader {
