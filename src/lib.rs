@@ -1401,7 +1401,7 @@ where
         _ => Err(serde::de::Error::custom(format!(
             "Invalid boot flag ({:#04x})",
             flag,
-        )))
+        ))),
     }
 }
 
