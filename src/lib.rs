@@ -1398,7 +1398,10 @@ where
     match flag {
         BOOTFLAG_ACTIVE => Ok(true),
         BOOTFLAG_INACTIVE => Ok(false),
-        _ => Err(serde::de::Error::custom(format!("Invalid boot flag ({:#04x})", flag)))
+        _ => Err(serde::de::Error::custom(format!(
+            "Invalid boot flag ({:#04x})",
+            flag,
+        )))
     }
 }
 
@@ -1411,8 +1414,6 @@ where
         false => serializer.serialize_u8(BOOTFLAG_INACTIVE),
     }
 }
-
-
 /// An abstraction struct for a logical partition
 #[derive(Debug, Clone, PartialEq)]
 pub struct LogicalPartition {
