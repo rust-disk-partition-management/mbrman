@@ -171,6 +171,8 @@ use thiserror::Error;
 const DEFAULT_ALIGN: u32 = 2048;
 const MAX_ALIGN: u32 = 16384;
 const FIRST_USABLE_LBA: u32 = 1;
+const BOOTFLAG_ACTIVE: u8 = 0x80;
+const BOOTFLAG_INACTIVE: u8 = 0x00;
 
 /// The result of reading, writing or managing a MBR.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -1323,6 +1325,10 @@ signature!(Signature55AA, 2, &[0x55, 0xaa], Signature55AAVisitor);
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct MBRPartitionEntry {
     /// Boot flag
+    #[serde(
+        deserialize_with = "bootflag_deserialize",
+        serialize_with = "bootflag_serialize"
+    )]
     pub boot: bool,
     /// CHS address of the first sector in the partition
     pub first_chs: CHS,
@@ -1384,6 +1390,30 @@ impl MBRPartitionEntry {
     }
 }
 
+fn bootflag_deserialize<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let flag: u8 = Deserialize::deserialize(deserializer)?;
+    match flag {
+        BOOTFLAG_ACTIVE => Ok(true),
+        BOOTFLAG_INACTIVE => Ok(false),
+        _ => Err(serde::de::Error::custom(format!(
+            "Invalid boot flag ({:#04x})",
+            flag,
+        ))),
+    }
+}
+
+fn bootflag_serialize<S>(boot: &bool, serializer: S) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match *boot {
+        true => serializer.serialize_u8(BOOTFLAG_ACTIVE),
+        false => serializer.serialize_u8(BOOTFLAG_INACTIVE),
+    }
+}
 /// An abstraction struct for a logical partition
 #[derive(Debug, Clone, PartialEq)]
 pub struct LogicalPartition {
@@ -1729,9 +1759,11 @@ mod tests {
         assert_eq!(mbr.header.iter().count(), 4);
         assert_eq!(mbr.header.iter_mut().count(), 4);
         assert_eq!(mbr.iter_mut().count(), 4);
+        assert_eq!(mbr.header.partition_1.boot, true);
         assert_eq!(mbr.header.partition_1.sys, 0x06);
         assert_eq!(mbr.header.partition_1.starting_lba, 1);
         assert_eq!(mbr.header.partition_1.sectors, 1);
+        assert_eq!(mbr.header.partition_2.boot, false);
         assert_eq!(mbr.header.partition_2.sys, 0x0b);
         assert_eq!(mbr.header.partition_2.starting_lba, 3);
         assert_eq!(mbr.header.partition_2.sectors, 1);
@@ -1835,7 +1867,7 @@ mod tests {
         });
         mbr.logical_partitions.push(LogicalPartition {
             partition: MBRPartitionEntry {
-                boot: false,
+                boot: true,
                 first_chs: CHS::empty(),
                 sys: 0x83,
                 last_chs: CHS::empty(),
@@ -1854,16 +1886,19 @@ mod tests {
         mbr.write_into(&mut cur).unwrap();
 
         let mut mbr = MBR::read_from(&mut cur, ss).unwrap();
+        assert_eq!(mbr.header.partition_1.boot, false);
         assert_eq!(mbr.header.partition_1.sys, 0x83);
         assert_eq!(mbr.header.partition_1.starting_lba, 1);
         assert_eq!(mbr.header.partition_1.sectors, 4);
         assert_eq!(mbr.logical_partitions.len(), 2);
         assert_eq!(mbr.logical_partitions[0].absolute_ebr_lba, 5);
+        assert_eq!(mbr.logical_partitions[0].partition.boot, false);
         assert_eq!(mbr.logical_partitions[0].partition.starting_lba, 6);
         assert_eq!(mbr.logical_partitions[0].partition.sectors, 1);
         assert_eq!(mbr.logical_partitions[0].partition.sys, 0);
         assert_eq!(mbr.logical_partitions[0].ebr_sectors, None);
         assert_eq!(mbr.logical_partitions[1].absolute_ebr_lba, 7);
+        assert_eq!(mbr.logical_partitions[1].partition.boot, true);
         assert_eq!(mbr.logical_partitions[1].partition.starting_lba, 9);
         assert_eq!(mbr.logical_partitions[1].partition.sectors, 1);
         assert_eq!(mbr.logical_partitions[1].partition.sys, 0x83);
@@ -1872,16 +1907,19 @@ mod tests {
         mbr.write_into(&mut cur).unwrap();
 
         let mbr = MBR::read_from(&mut cur, ss).unwrap();
+        assert_eq!(mbr.header.partition_1.boot, false);
         assert_eq!(mbr.header.partition_1.sys, 0x83);
         assert_eq!(mbr.header.partition_1.starting_lba, 1);
         assert_eq!(mbr.header.partition_1.sectors, 4);
         assert_eq!(mbr.logical_partitions.len(), 2);
         assert_eq!(mbr.logical_partitions[0].absolute_ebr_lba, 5);
+        assert_eq!(mbr.logical_partitions[0].partition.boot, false);
         assert_eq!(mbr.logical_partitions[0].partition.starting_lba, 6);
         assert_eq!(mbr.logical_partitions[0].partition.sectors, 1);
         assert_eq!(mbr.logical_partitions[0].partition.sys, 0);
         assert_eq!(mbr.logical_partitions[0].ebr_sectors, None);
         assert_eq!(mbr.logical_partitions[1].absolute_ebr_lba, 7);
+        assert_eq!(mbr.logical_partitions[1].partition.boot, true);
         assert_eq!(mbr.logical_partitions[1].partition.starting_lba, 9);
         assert_eq!(mbr.logical_partitions[1].partition.sectors, 1);
         assert_eq!(mbr.logical_partitions[1].partition.sys, 0x83);
