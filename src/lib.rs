@@ -179,6 +179,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// An error
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     /// The CHS address requested cannot be represented in CHS
     ///
