@@ -3,36 +3,58 @@ name: Rust
 on:
   push:
     branches: [ main ]
-  pull_request:
-    branches: [ main ]
   schedule:
     - cron: 0 0 1 * *
+  pull_request:
+    branches: [ main ]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-
-    runs-on: ubuntu-latest
-
-    outputs:
-      size: ${{ steps.build.outputs.size }}
-
+  test:
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+        rust:
+          - stable
+          - 1.51.0 # MSRV
+        include:
+          - os: ubuntu-latest
+            rust: stable
+            lint: 1
+    runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v2
-    - run: cargo test --all-features --verbose
-    - run: cargo doc --verbose --all-features
+      - name: Checkout source
+        uses: actions/checkout@v2
 
-  checks:
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust }}
+          default: true
+          override: true
 
-    runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'pull_request' }}
+      - uses: Swatinem/rust-cache@v1
 
-    steps:
-    - uses: actions/checkout@v2
-    - run: cargo fmt -- --check
-    - uses: actions-rs/clippy-check@v1
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-        args: --all-features -- -D warnings
+      - name: cargo test
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --workspace --all-features
+
+      - name: rustfmt
+        if: github.event_name == 'pull_request' && matrix.lint
+        uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --all -- --check
+
+      - name: clippy
+        if: github.event_name == 'pull_request' && matrix.lint
+        uses: actions-rs/clippy-check@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          args: --all --tests --all-features -- -D warnings

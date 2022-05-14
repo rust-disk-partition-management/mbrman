@@ -1,5 +1,6 @@
 ![Rust](https://github.com/rust-disk-partition-management/mbrman/workflows/Rust/badge.svg)
 [![Latest Version](https://img.shields.io/crates/v/mbrman.svg)](https://crates.io/crates/mbrman)
+![Rust 1.51+](https://img.shields.io/badge/rust-1.51%2B-orange.svg)
 ![License](https://img.shields.io/crates/l/mbrman)
 [![Docs.rs](https://docs.rs/mbrman/badge.svg)](https://docs.rs/mbrman)
 [![LOC](https://tokei.rs/b1/github/rust-disk-partition-management/mbrman)](https://github.com/rust-disk-partition-management/mbrman)
