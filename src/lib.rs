@@ -1253,7 +1253,7 @@ bytes_blob!(BootstrapCode446, 446, BootstrapCode446Visitor);
 macro_rules! signature {
     ($name:ident, $n:expr, $bytes:expr, $visitor:ident) => {
         /// A specific signature
-        #[derive(Clone, PartialEq)]
+        #[derive(Clone, PartialEq, Eq)]
         pub struct $name;
 
         struct $visitor;
@@ -1323,7 +1323,7 @@ macro_rules! signature {
 signature!(Signature55AA, 2, &[0x55, 0xaa], Signature55AAVisitor);
 
 /// An MBR partition entry
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct MBRPartitionEntry {
     /// Boot flag
     #[serde(
@@ -1473,7 +1473,7 @@ impl LogicalPartition {
 }
 
 /// A CHS address (cylinder/head/sector)
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct CHS {
     /// Cylinder
     pub cylinder: u16,
