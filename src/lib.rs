@@ -1388,6 +1388,11 @@ impl MBRPartitionEntry {
             || self.sys == 0xc5
             || self.sys == 0xd5
     }
+
+    /// Returns `true` if the partition is marked active (bootable)
+    pub fn is_active(&self) -> bool {
+        self.boot == BOOT_ACTIVE
+    }
 }
 
 /// An abstraction struct for a logical partition
@@ -1732,6 +1737,10 @@ mod tests {
         assert!(mbr.header.partition_2.is_used());
         assert!(mbr.header.partition_3.is_unused());
         assert!(mbr.header.partition_4.is_unused());
+        assert!(mbr.header.partition_1.is_active());
+        assert!(!mbr.header.partition_2.is_active());
+        assert!(!mbr.header.partition_3.is_active());
+        assert!(!mbr.header.partition_4.is_active());
         assert_eq!(mbr.len(), 4);
         assert_eq!(mbr.header.iter().count(), 4);
         assert_eq!(mbr.header.iter_mut().count(), 4);
@@ -1753,6 +1762,10 @@ mod tests {
         assert!(mbr.header.partition_2.is_used());
         assert!(mbr.header.partition_3.is_unused());
         assert!(mbr.header.partition_4.is_unused());
+        assert!(!mbr.header.partition_1.is_active());
+        assert!(!mbr.header.partition_2.is_active());
+        assert!(!mbr.header.partition_3.is_active());
+        assert!(!mbr.header.partition_4.is_active());
         assert_eq!(mbr.header.partition_2.sys, 0x05);
         assert_eq!(mbr.header.partition_2.starting_lba, 5);
         assert_eq!(mbr.header.partition_2.first_chs, CHS::new(0, 1, 3));
