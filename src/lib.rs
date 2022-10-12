@@ -224,6 +224,9 @@ pub enum Error {
     /// An error that occurs when there is not enough space left on the table to continue.
     #[error("no space left")]
     NoSpaceLeft,
+    /// Partition has invalid boot flag
+    #[error("partition has invalid boot flag")]
+    InvalidBootFlag,
 }
 
 /// A type representing a MBR partition table including its partition, the sector size of the disk
@@ -428,7 +431,7 @@ impl MBR {
                             //       EBR exists
                             break;
                         } else {
-                            return Err(err.into());
+                            return Err(err);
                         }
                     }
                 };
@@ -558,17 +561,16 @@ impl MBR {
                 .map(Some)
                 .chain(once(None));
             for (l, next) in self.logical_partitions.iter().zip(next_logical_partitions) {
+                let partition = MBRPartitionEntry {
+                    starting_lba: l.partition.starting_lba.saturating_sub(l.absolute_ebr_lba),
+                    ..l.partition
+                };
+                partition.check()?;
                 writer.seek(SeekFrom::Start(u64::from(
                     l.absolute_ebr_lba * self.sector_size,
                 )))?;
                 serialize_into(&mut writer, &l.bootstrap_code)?;
-                serialize_into(
-                    &mut writer,
-                    &MBRPartitionEntry {
-                        starting_lba: l.partition.starting_lba.saturating_sub(l.absolute_ebr_lba),
-                        ..l.partition
-                    },
-                )?;
+                serialize_into(&mut writer, &partition)?;
                 if let Some(next) = next {
                     serialize_into(
                         &mut writer,
@@ -1068,7 +1070,9 @@ impl MBRHeader {
         R: Read + Seek,
     {
         reader.seek(SeekFrom::Start(0))?;
-        Ok(deserialize_from(&mut reader)?)
+        let header: Self = deserialize_from(&mut reader)?;
+        header.check()?;
+        Ok(header)
     }
 
     /// Make a new MBR header
@@ -1091,10 +1095,16 @@ impl MBRHeader {
     where
         W: Write + Seek,
     {
+        self.check()?;
         writer.seek(SeekFrom::Start(0))?;
         serialize_into(&mut writer, &self)?;
 
         Ok(())
+    }
+
+    /// Validate invariants
+    fn check(&self) -> Result<()> {
+        self.iter().try_for_each(|(_, partition)| partition.check())
     }
 }
 
@@ -1125,11 +1135,19 @@ struct EBRHeader {
 }
 
 impl EBRHeader {
-    fn read_from<R: ?Sized>(mut reader: &mut R) -> bincode::Result<EBRHeader>
+    fn read_from<R: ?Sized>(mut reader: &mut R) -> Result<EBRHeader>
     where
         R: Read,
     {
-        deserialize_from(&mut reader)
+        let header: Self = deserialize_from(&mut reader)?;
+        header.check()?;
+        Ok(header)
+    }
+
+    /// Validate invariants
+    fn check(&self) -> Result<()> {
+        self.partition_1.check()?;
+        self.partition_2.check()
     }
 
     fn unwrap(self) -> (MBRPartitionEntry, MBRPartitionEntry, BootstrapCode446) {
@@ -1392,6 +1410,14 @@ impl MBRPartitionEntry {
     /// Returns `true` if the partition is marked active (bootable)
     pub fn is_active(&self) -> bool {
         self.boot == BOOT_ACTIVE
+    }
+
+    /// Validate invariants
+    fn check(&self) -> Result<()> {
+        if self.boot != BOOT_ACTIVE && self.boot != BOOT_INACTIVE {
+            return Err(Error::InvalidBootFlag);
+        }
+        Ok(())
     }
 }
 
@@ -2058,5 +2084,62 @@ mod tests {
         code[42] = 0xff;
         assert!(code.contains(&0xff));
         assert_eq!(&code[..], code.as_slice());
+    }
+
+    fn read_corrupt_mbr(path: &str, bad_offset: usize, bad_data: u8) -> Error {
+        let mut data = Vec::new();
+        File::open(path).unwrap().read_to_end(&mut data).unwrap();
+        data[bad_offset] = bad_data;
+        let mut cur = Cursor::new(&data);
+        MBR::read_from(&mut cur, 512).unwrap_err()
+    }
+
+    #[test]
+    fn read_invalid_boot_flag() {
+        // primary partition
+        assert!(matches!(
+            read_corrupt_mbr(DISK2, 0x1be, BOOT_ACTIVE | 0x01),
+            Error::InvalidBootFlag
+        ));
+        // EBR first partition
+        assert!(matches!(
+            read_corrupt_mbr(DISK2, 0xfbe, BOOT_ACTIVE | 0x01),
+            Error::InvalidBootFlag
+        ));
+        // EBR second partition
+        assert!(matches!(
+            read_corrupt_mbr(DISK2, 0xfce, BOOT_ACTIVE | 0x01),
+            Error::InvalidBootFlag
+        ));
+    }
+
+    #[test]
+    fn write_invalid_boot_flag() {
+        let ss = 512_u32;
+        let data = vec![0; 10 * ss as usize];
+        let mut cur = Cursor::new(data);
+
+        // primary partition
+        let mut mbr = MBR::new_from(&mut cur, ss, [0xff; 4]).unwrap();
+        mbr.header.partition_2.boot = BOOT_ACTIVE | 0x01;
+        mbr.header.partition_2.sys = 0x0a;
+        mbr.header.partition_2.starting_lba = 1;
+        mbr.header.partition_2.sectors = 10;
+        assert!(matches!(
+            mbr.write_into(&mut cur).unwrap_err(),
+            Error::InvalidBootFlag
+        ));
+
+        // logical partition
+        let mut mbr = MBR::new_from(&mut cur, ss, [0xff; 4]).unwrap();
+        mbr.align = 1;
+        mbr.header.partition_1.sys = 0x0f;
+        mbr.header.partition_1.starting_lba = 1;
+        mbr.header.partition_1.sectors = 10;
+        mbr.push(0x0f, 1, 9).unwrap().partition.boot = BOOT_ACTIVE | 0x01;
+        assert!(matches!(
+            mbr.write_into(&mut cur).unwrap_err(),
+            Error::InvalidBootFlag
+        ));
     }
 }
