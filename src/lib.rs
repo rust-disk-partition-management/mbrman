@@ -158,7 +158,6 @@
 
 use bincode::{deserialize_from, serialize_into};
 use bitvec::prelude::*;
-use serde::de;
 use serde::de::{SeqAccess, Visitor};
 use serde::ser::SerializeTuple;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -171,6 +170,7 @@ use thiserror::Error;
 const DEFAULT_ALIGN: u32 = 2048;
 const MAX_ALIGN: u32 = 16384;
 const FIRST_USABLE_LBA: u32 = 1;
+const BOOT_SIGNATURE: [u8; 2] = [0x55, 0xaa];
 
 /// Boot flag for a bootable partition
 pub const BOOT_ACTIVE: u8 = 0x80;
@@ -224,6 +224,9 @@ pub enum Error {
     /// An error that occurs when there is not enough space left on the table to continue.
     #[error("no space left")]
     NoSpaceLeft,
+    /// MBR doesn't have the expected signature value
+    #[error("invalid MBR signature")]
+    InvalidSignature,
     /// Partition has invalid boot flag
     #[error("partition has invalid boot flag")]
     InvalidBootFlag,
@@ -589,7 +592,7 @@ impl MBR {
                     serialize_into(&mut writer, &MBRPartitionEntry::empty())?;
                 }
                 writer.seek(SeekFrom::Current(16 * 2))?;
-                serialize_into(&mut writer, &Signature55AA)?;
+                serialize_into(&mut writer, &BOOT_SIGNATURE)?;
             }
         }
 
@@ -984,7 +987,7 @@ pub struct MBRHeader {
     /// Partition 4
     pub partition_4: MBRPartitionEntry,
     /// Boot signature
-    pub boot_signature: Signature55AA,
+    pub boot_signature: [u8; 2],
 }
 
 impl MBRHeader {
@@ -1085,7 +1088,7 @@ impl MBRHeader {
             partition_2: MBRPartitionEntry::empty(),
             partition_3: MBRPartitionEntry::empty(),
             partition_4: MBRPartitionEntry::empty(),
-            boot_signature: Signature55AA,
+            boot_signature: BOOT_SIGNATURE,
         }
     }
 
@@ -1104,6 +1107,9 @@ impl MBRHeader {
 
     /// Validate invariants
     fn check(&self) -> Result<()> {
+        if self.boot_signature != BOOT_SIGNATURE {
+            return Err(Error::InvalidSignature);
+        }
         self.iter().try_for_each(|(_, partition)| partition.check())
     }
 }
@@ -1131,7 +1137,7 @@ struct EBRHeader {
     partition_2: MBRPartitionEntry,
     _unused_partition_3: [u8; 16],
     _unused_partition_4: [u8; 16],
-    _boot_signature: Signature55AA,
+    boot_signature: [u8; 2],
 }
 
 impl EBRHeader {
@@ -1146,6 +1152,9 @@ impl EBRHeader {
 
     /// Validate invariants
     fn check(&self) -> Result<()> {
+        if self.boot_signature != BOOT_SIGNATURE {
+            return Err(Error::InvalidSignature);
+        }
         self.partition_1.check()?;
         self.partition_2.check()
     }
@@ -1270,78 +1279,6 @@ macro_rules! bytes_blob {
 
 bytes_blob!(BootstrapCode440, 440, BootstrapCode440Visitor);
 bytes_blob!(BootstrapCode446, 446, BootstrapCode446Visitor);
-
-macro_rules! signature {
-    ($name:ident, $n:expr, $bytes:expr, $visitor:ident) => {
-        /// A specific signature
-        #[derive(Clone, PartialEq, Eq)]
-        pub struct $name;
-
-        struct $visitor;
-
-        impl<'de> Visitor<'de> for $visitor {
-            type Value = $name;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(formatter, "the sequence of bytes: {:?}", $bytes)
-            }
-
-            fn visit_seq<A>(self, mut seq: A) -> std::result::Result<$name, A::Error>
-            where
-                A: SeqAccess<'de>,
-            {
-                let mut i = 0;
-                let mut bytes = [0; $n];
-                loop {
-                    match seq.next_element::<u8>()? {
-                        Some(x) => bytes[i] = x,
-                        None => break,
-                    }
-                    i += 1;
-                }
-
-                if &bytes != $bytes {
-                    return Err(de::Error::custom(format!(
-                        "invalid signature {:?}, expected: {:?}",
-                        bytes, $bytes
-                    )));
-                }
-
-                Ok($name)
-            }
-        }
-
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                deserializer.deserialize_tuple($n, $visitor)
-            }
-        }
-
-        impl Serialize for $name {
-            fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-            where
-                S: Serializer,
-            {
-                let mut seq = serializer.serialize_tuple($n)?;
-                for x in $bytes.iter() {
-                    seq.serialize_element::<u8>(&x)?;
-                }
-                seq.end()
-            }
-        }
-
-        impl std::fmt::Debug for $name {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "{:?}", $bytes)
-            }
-        }
-    };
-}
-
-signature!(Signature55AA, 2, &[0x55, 0xaa], Signature55AAVisitor);
 
 /// An MBR partition entry
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -2092,6 +2029,38 @@ mod tests {
         data[bad_offset] = bad_data;
         let mut cur = Cursor::new(&data);
         MBR::read_from(&mut cur, 512).unwrap_err()
+    }
+
+    #[test]
+    fn read_invalid_boot_signature() {
+        // MBR
+        assert!(matches!(
+            read_corrupt_mbr(DISK2, 0xffe, 0xaa),
+            Error::InvalidSignature
+        ));
+        // EBR
+        assert!(matches!(
+            read_corrupt_mbr(DISK2, 0x21fe, 0xaa),
+            Error::InvalidSignature
+        ));
+    }
+
+    #[test]
+    fn write_invalid_boot_signature() {
+        let ss = 512_u32;
+        let data = vec![0; 10 * ss as usize];
+        let mut cur = Cursor::new(data);
+
+        // invalid in MBRHeader struct
+        let mut mbr = MBR::new_from(&mut cur, ss, [0xff; 4]).unwrap();
+        mbr.header.partition_1.sys = 0x0a;
+        mbr.header.partition_1.starting_lba = 1;
+        mbr.header.partition_1.sectors = 10;
+        mbr.header.boot_signature = [0, 0];
+        assert!(matches!(
+            mbr.write_into(&mut cur).unwrap_err(),
+            Error::InvalidSignature
+        ));
     }
 
     #[test]
