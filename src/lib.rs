@@ -597,7 +597,7 @@ impl MBR {
                 } else {
                     serialize_into(&mut writer, &MBRPartitionEntry::empty())?;
                 }
-                writer.seek(SeekFrom::Current(16 * 2))?;
+                writer.write_all(&[0; 16 * 2])?;
                 serialize_into(&mut writer, &BOOT_SIGNATURE)?;
             }
         }
