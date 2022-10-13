@@ -1516,7 +1516,7 @@ mod tests {
     const DISK2: &str = "tests/fixtures/disk2.img";
 
     #[test]
-    fn deserizlize_maximum_chs_value() {
+    fn deserialize_maximum_chs_value() {
         let chs: CHS = bincode::deserialize(&[0xff, 0xff, 0xff]).unwrap();
         assert_eq!(
             chs,
@@ -1540,7 +1540,7 @@ mod tests {
     }
 
     #[test]
-    fn serialize_and_deserizlize_some_chs_value() {
+    fn serialize_and_deserialize_some_chs_value() {
         let chs: CHS = bincode::deserialize(&[0xaa, 0xaa, 0xaa]).unwrap();
         assert_eq!(
             chs,
