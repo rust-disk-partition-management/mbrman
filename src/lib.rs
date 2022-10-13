@@ -140,8 +140,8 @@
 //!         absolute_ebr_lba: 1,
 //!         // the number of sectors in the first EBR is never known
 //!         ebr_sectors: None,
-//!         // this helper generates an empty boot sector in the EBR
-//!         bootstrap_code: mbrman::BootstrapCode446::new(),
+//!         // empty boot sector in the EBR
+//!         bootstrap_code: [0; 446],
 //!         // this is the absolute CHS address of the EBR (only used by old computers)
 //!         ebr_first_chs: mbrman::CHS::empty(),                // only for old computers
 //!         // this is the absolute CHS address of the last EBR (only used by old computers)
@@ -161,6 +161,7 @@ use bitvec::prelude::*;
 use serde::de::{SeqAccess, Visitor};
 use serde::ser::SerializeTuple;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_big_array::BigArray;
 use std::convert::TryFrom;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::iter::{once, repeat};
@@ -255,7 +256,7 @@ pub enum Error {
 ///     }
 /// }
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MBR {
     /// Sector size of the disk.
     ///
@@ -557,6 +558,11 @@ impl MBR {
                 }
             }
 
+            // newtype for bootstrap code so we can serialize it via BigArray
+            // pending https://github.com/serde-rs/serde/issues/1937
+            #[derive(Serialize)]
+            struct BootstrapCode446(#[serde(with = "BigArray")] [u8; 446]);
+
             let next_logical_partitions = self
                 .logical_partitions
                 .iter()
@@ -572,7 +578,7 @@ impl MBR {
                 writer.seek(SeekFrom::Start(u64::from(
                     l.absolute_ebr_lba * self.sector_size,
                 )))?;
-                serialize_into(&mut writer, &l.bootstrap_code)?;
+                serialize_into(&mut writer, &BootstrapCode446(l.bootstrap_code))?;
                 serialize_into(&mut writer, &partition)?;
                 if let Some(next) = next {
                     serialize_into(
@@ -910,7 +916,7 @@ impl MBR {
             } else {
                 Some(CHS::empty())
             },
-            bootstrap_code: BootstrapCode446::new(),
+            bootstrap_code: [0; 446],
         };
 
         if l.absolute_ebr_lba < extended.starting_lba {
@@ -970,10 +976,11 @@ impl IndexMut<usize> for MBR {
 }
 
 /// An MBR partition table header
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct MBRHeader {
     /// Bootstrap code area
-    pub bootstrap_code: BootstrapCode440,
+    #[serde(with = "BigArray")]
+    pub bootstrap_code: [u8; 440],
     /// 32-bit disk signature
     pub disk_signature: [u8; 4],
     /// `[0x5a, 0x5a]` if protected, `[0x00, 0x00]` if not
@@ -1081,7 +1088,7 @@ impl MBRHeader {
     /// Make a new MBR header
     pub fn new(disk_signature: [u8; 4]) -> MBRHeader {
         MBRHeader {
-            bootstrap_code: BootstrapCode440::new(),
+            bootstrap_code: [0; 440],
             disk_signature,
             copy_protected: [0x00, 0x00],
             partition_1: MBRPartitionEntry::empty(),
@@ -1132,7 +1139,8 @@ impl IndexMut<usize> for MBRHeader {
 
 #[derive(Debug, Clone, Deserialize)]
 struct EBRHeader {
-    bootstrap_code: BootstrapCode446,
+    #[serde(with = "BigArray")]
+    bootstrap_code: [u8; 446],
     partition_1: MBRPartitionEntry,
     partition_2: MBRPartitionEntry,
     _unused_partition_3: [u8; 16],
@@ -1159,126 +1167,10 @@ impl EBRHeader {
         self.partition_2.check()
     }
 
-    fn unwrap(self) -> (MBRPartitionEntry, MBRPartitionEntry, BootstrapCode446) {
+    fn unwrap(self) -> (MBRPartitionEntry, MBRPartitionEntry, [u8; 446]) {
         (self.partition_1, self.partition_2, self.bootstrap_code)
     }
 }
-
-macro_rules! bytes_blob {
-    ($name:ident, $n:expr, $visitor:ident) => {
-        /// A blob of bytes
-        #[derive(Clone)]
-        pub struct $name(pub [u8; $n]);
-
-        impl Default for $name {
-            fn default() -> Self {
-                Self([0; $n])
-            }
-        }
-
-        impl $name {
-            /// Create a new empty blob of bytes
-            pub fn new() -> Self {
-                Self::default()
-            }
-
-            /// Extracts a slice containing the bootstrap code.
-            pub fn as_slice(&self) -> &[u8] {
-                &self.0
-            }
-        }
-
-        impl std::ops::Deref for $name {
-            type Target = [u8; $n];
-
-            fn deref(&self) -> &[u8; $n] {
-                &self.0
-            }
-        }
-
-        impl std::ops::DerefMut for $name {
-            fn deref_mut(&mut self) -> &mut Self::Target {
-                &mut self.0
-            }
-        }
-
-        struct $visitor;
-
-        impl<'de> Visitor<'de> for $visitor {
-            type Value = $name;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(formatter, "a sequence of {} bytes", $n)
-            }
-
-            fn visit_seq<A>(self, mut seq: A) -> std::result::Result<$name, A::Error>
-            where
-                A: SeqAccess<'de>,
-            {
-                let mut bytes = [0_u8; $n];
-                let mut i = 0;
-                loop {
-                    match seq.next_element()? {
-                        Some(x) => bytes[i] = x,
-                        None => break,
-                    }
-                    i += 1;
-                }
-
-                Ok($name(bytes))
-            }
-        }
-
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                deserializer.deserialize_tuple($n, $visitor)
-            }
-        }
-
-        impl Serialize for $name {
-            fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-            where
-                S: Serializer,
-            {
-                let mut seq = serializer.serialize_tuple($n)?;
-                for x in self.0.iter() {
-                    seq.serialize_element(&x)?;
-                }
-                seq.end()
-            }
-        }
-
-        impl std::fmt::Debug for $name {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "[")?;
-                for i in 0..($n - 1) {
-                    write!(f, "{:02x} ", self.0[i])?;
-                }
-                write!(f, "{:02x}]", self.0[$n - 1])?;
-
-                Ok(())
-            }
-        }
-
-        impl PartialEq for $name {
-            fn eq(&self, other: &Self) -> bool {
-                for i in 0..$n {
-                    if self.0[i] != other.0[i] {
-                        return false;
-                    }
-                }
-
-                true
-            }
-        }
-    };
-}
-
-bytes_blob!(BootstrapCode440, 440, BootstrapCode440Visitor);
-bytes_blob!(BootstrapCode446, 446, BootstrapCode446Visitor);
 
 /// An MBR partition entry
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -1359,7 +1251,7 @@ impl MBRPartitionEntry {
 }
 
 /// An abstraction struct for a logical partition
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogicalPartition {
     /// MBR partition entry of the logical partition
     pub partition: MBRPartitionEntry,
@@ -1384,7 +1276,7 @@ pub struct LogicalPartition {
     /// This information is known for all the EBR except the first logical partition
     pub ebr_last_chs: Option<CHS>,
     /// Bootstrap code area
-    pub bootstrap_code: BootstrapCode446,
+    pub bootstrap_code: [u8; 446],
 }
 
 impl LogicalPartition {
@@ -1817,7 +1709,7 @@ mod tests {
             ebr_sectors: None,
             ebr_first_chs: CHS::empty(),
             ebr_last_chs: None,
-            bootstrap_code: BootstrapCode446::new(),
+            bootstrap_code: [0; 446],
         });
         mbr.logical_partitions.push(LogicalPartition {
             partition: MBRPartitionEntry {
@@ -1832,7 +1724,7 @@ mod tests {
             ebr_sectors: Some(3),
             ebr_first_chs: CHS::empty(),
             ebr_last_chs: Some(CHS::empty()),
-            bootstrap_code: BootstrapCode446::new(),
+            bootstrap_code: [0; 446],
         });
 
         // NOTE: don't put this in a loop otherwise it's hard to guess if the error come from
@@ -1903,7 +1795,7 @@ mod tests {
         mbr.header.partition_3.starting_lba = 5;
         mbr.header.partition_3.sectors = 5;
         mbr.logical_partitions.push(LogicalPartition {
-            bootstrap_code: BootstrapCode446::new(),
+            bootstrap_code: [0; 446],
             partition: MBRPartitionEntry {
                 boot: BOOT_INACTIVE,
                 first_chs: CHS::empty(),
@@ -2013,14 +1905,6 @@ mod tests {
         assert_eq!(mbr.logical_partitions[0].partition.starting_lba, 5);
         assert_eq!(mbr.logical_partitions[0].absolute_ebr_lba, 1);
         assert_eq!(mbr.logical_partitions[0].ebr_sectors, None);
-    }
-
-    #[test]
-    fn bootstrap_code_deref_derefmut_and_as_slice() {
-        let mut code = BootstrapCode440::new();
-        code[42] = 0xff;
-        assert!(code.contains(&0xff));
-        assert_eq!(&code[..], code.as_slice());
     }
 
     fn read_corrupt_mbr(path: &str, bad_offset: usize, bad_data: u8) -> Error {
