@@ -64,7 +64,7 @@ let starting_lba = mbr.find_optimal_place(sectors)
     .expect("could not find a place to put the partition");
 
 mbr[free_partition_number] = mbrman::MBRPartitionEntry {
-    boot: false,                        // boot flag
+    boot: mbrman::BOOT_INACTIVE,        // boot flag
     first_chs: mbrman::CHS::empty(),    // first CHS address (only useful for old computers)
     sys: 0x83,                          // Linux filesystem
     last_chs: mbrman::CHS::empty(),     // last CHS address (only useful for old computers)
@@ -102,7 +102,7 @@ let mut mbr = mbrman::MBR::new_from(&mut cur, ss as u32, [0xff; 4])
     .expect("could not create partition table");
 
 mbr[1] = mbrman::MBRPartitionEntry {
-    boot: false,                        // boot flag
+    boot: mbrman::BOOT_INACTIVE,        // boot flag
     first_chs: mbrman::CHS::empty(),    // first CHS address (only useful for old computers)
     sys: 0x0f,                          // extended partition with LBA
     last_chs: mbrman::CHS::empty(),     // last CHS address (only useful for old computers)
@@ -132,7 +132,7 @@ let mut mbr = mbrman::MBR::new_from(&mut cur, ss as u32, [0xff; 4])
     .expect("could not create partition table");
 
 mbr[1] = mbrman::MBRPartitionEntry {
-    boot: false,                        // boot flag
+    boot: mbrman::BOOT_INACTIVE,        // boot flag
     first_chs: mbrman::CHS::empty(),    // first CHS address (only useful for old computers)
     sys: 0x0f,                          // extended partition with LBA
     last_chs: mbrman::CHS::empty(),     // last CHS address (only useful for old computers)
@@ -145,7 +145,7 @@ mbr.logical_partitions.push(
     mbrman::LogicalPartition {
         // this is the actual partition entry for the logical volume
         partition: mbrman::MBRPartitionEntry {
-            boot: false,
+            boot: mbrman::BOOT_INACTIVE,
             first_chs: mbrman::CHS::empty(),
             sys: 0x83,
             last_chs: mbrman::CHS::empty(),
@@ -156,8 +156,8 @@ mbr.logical_partitions.push(
         absolute_ebr_lba: 1,
         // the number of sectors in the first EBR is never known
         ebr_sectors: None,
-        // this helper generates an empty boot sector in the EBR
-        bootstrap_code: mbrman::BootstrapCode446::new(),
+        // empty boot sector in the EBR
+        bootstrap_code: [0; 446],
         // this is the absolute CHS address of the EBR (only used by old computers)
         ebr_first_chs: mbrman::CHS::empty(),                // only for old computers
         // this is the absolute CHS address of the last EBR (only used by old computers)
