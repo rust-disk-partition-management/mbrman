@@ -393,8 +393,7 @@ impl MBR {
         })
     }
 
-    /// Read the MBR on a reader. This function will try to read the backup header if the primary
-    /// header could not be read.
+    /// Read the MBR on a reader.
     ///
     /// # Examples
     /// Basic usage:
