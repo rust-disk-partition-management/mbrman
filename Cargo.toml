@@ -16,7 +16,7 @@ include = ["src/**/*.rs", "tests/fixtures/*.img", "README.md", "LICENSE.Apache-2
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bitvec = "0.22"
+bitvec = "1.0.1"
 bincode = "1.0.1"
 serde = { version = "1.0.116", features = ["derive"] }
 serde-big-array = "0.4.1"
