@@ -1148,11 +1148,11 @@ struct EBRHeader {
 }
 
 impl EBRHeader {
-    fn read_from<R: ?Sized>(mut reader: &mut R) -> Result<EBRHeader>
+    fn read_from<R: ?Sized>(reader: &mut R) -> Result<EBRHeader>
     where
         R: Read,
     {
-        let header: Self = deserialize_from(&mut reader)?;
+        let header: Self = deserialize_from(reader)?;
         header.check()?;
         Ok(header)
     }
