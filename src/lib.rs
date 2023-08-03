@@ -162,7 +162,6 @@ use serde::de::{SeqAccess, Visitor};
 use serde::ser::SerializeTuple;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_big_array::BigArray;
-use std::convert::TryFrom;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::iter::{once, repeat};
 use std::ops::{Index, IndexMut};
