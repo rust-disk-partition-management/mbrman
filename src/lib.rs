@@ -156,7 +156,6 @@
 
 #![deny(missing_docs)]
 
-use bincode::{deserialize_from, serialize_into};
 use bitvec::prelude::*;
 use serde::de::{SeqAccess, Visitor};
 use serde::ser::SerializeTuple;
@@ -165,6 +164,9 @@ use serde_big_array::BigArray;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::iter::{once, repeat};
 use std::ops::{Index, IndexMut};
+use bincode::config::legacy;
+use bincode::error::{DecodeError, EncodeError};
+use bincode::serde::{decode_from_std_read, encode_into_std_write};
 use thiserror::Error;
 
 const DEFAULT_ALIGN: u32 = 2048;
@@ -196,7 +198,10 @@ pub enum Error {
     LBAExceedsMaximumCylinders,
     /// Deserialization errors.
     #[error("deserialization failed")]
-    Deserialize(#[from] bincode::Error),
+    Deserialize(#[from] DecodeError),
+    /// Serialization errors.
+    #[error("Serialization failed")]
+    Serialize(#[from] EncodeError),
     /// I/O errors.
     #[error("generic I/O error")]
     Io(#[from] std::io::Error),
@@ -377,7 +382,7 @@ impl MBR {
         S: Seek,
     {
         let disk_size = u32::try_from(seeker.seek(SeekFrom::End(0))? / u64::from(sector_size))
-            .unwrap_or(u32::max_value());
+            .unwrap_or(u32::MAX);
         let header = MBRHeader::new(disk_signature);
 
         Ok(MBR {
@@ -407,7 +412,7 @@ impl MBR {
         R: Read + Seek,
     {
         let disk_size = u32::try_from(reader.seek(SeekFrom::End(0))? / u64::from(sector_size))
-            .unwrap_or(u32::max_value());
+            .unwrap_or(u32::MAX);
         let header = MBRHeader::read_from(&mut reader)?;
 
         let mut logical_partitions = Vec::new();
@@ -451,7 +456,7 @@ impl MBR {
                 });
 
                 if next.starting_lba > 0 && relative_ebr_lba >= next.starting_lba {
-                    return Err(Error::InconsistentEBR);
+                    return Err(Error::from(Error::InconsistentEBR));
                 }
 
                 relative_ebr_lba = next.starting_lba;
@@ -576,11 +581,10 @@ impl MBR {
                 writer.seek(SeekFrom::Start(u64::from(
                     l.absolute_ebr_lba * self.sector_size,
                 )))?;
-                serialize_into(&mut writer, &BootstrapCode446(l.bootstrap_code))?;
-                serialize_into(&mut writer, &partition)?;
+                encode_into_std_write(&BootstrapCode446(l.bootstrap_code), &mut writer, legacy())?;
+                encode_into_std_write(&partition, &mut writer, legacy())?;
                 if let Some(next) = next {
-                    serialize_into(
-                        &mut writer,
+                    encode_into_std_write(
                         &MBRPartitionEntry {
                             boot: BOOT_INACTIVE,
                             first_chs: next.ebr_first_chs,
@@ -591,12 +595,14 @@ impl MBR {
                                 .saturating_sub(extended.starting_lba),
                             sectors: next.ebr_sectors.unwrap(),
                         },
+                        &mut writer,
+                        legacy()
                     )?;
                 } else {
-                    serialize_into(&mut writer, &MBRPartitionEntry::empty())?;
+                    encode_into_std_write(&MBRPartitionEntry::empty(), &mut writer, legacy())?;
                 }
                 writer.write_all(&[0; 16 * 2])?;
-                serialize_into(&mut writer, &BOOT_SIGNATURE)?;
+                encode_into_std_write(&BOOT_SIGNATURE, &mut writer, legacy())?;
             }
         }
 
@@ -1078,7 +1084,7 @@ impl MBRHeader {
         R: Read + Seek,
     {
         reader.seek(SeekFrom::Start(0))?;
-        let header: Self = deserialize_from(&mut reader)?;
+        let header: Self = decode_from_std_read(&mut reader, legacy())?;
         header.check()?;
         Ok(header)
     }
@@ -1105,7 +1111,7 @@ impl MBRHeader {
     {
         self.check()?;
         writer.seek(SeekFrom::Start(0))?;
-        serialize_into(&mut writer, &self)?;
+        encode_into_std_write(&self, &mut writer, legacy())?;
 
         Ok(())
     }
@@ -1123,14 +1129,14 @@ impl Index<usize> for MBRHeader {
     type Output = MBRPartitionEntry;
 
     fn index(&self, i: usize) -> &Self::Output {
-        assert!(i != 0, "invalid partition index: 0");
+        assert_ne!(i, 0, "invalid partition index: 0");
         self.get(i).expect("invalid partition")
     }
 }
 
 impl IndexMut<usize> for MBRHeader {
     fn index_mut(&mut self, i: usize) -> &mut Self::Output {
-        assert!(i != 0, "invalid partition index: 0");
+        assert_ne!(i, 0, "invalid partition index: 0");
         self.get_mut(i).expect("invalid partition")
     }
 }
@@ -1147,11 +1153,11 @@ struct EBRHeader {
 }
 
 impl EBRHeader {
-    fn read_from<R: ?Sized>(reader: &mut R) -> Result<EBRHeader>
+    fn read_from<R>(reader: &mut R) -> Result<EBRHeader>
     where
         R: Read,
     {
-        let header: Self = deserialize_from(reader)?;
+        let header: Self = decode_from_std_read(reader, legacy())?;
         header.check()?;
         Ok(header)
     }
@@ -1509,13 +1515,14 @@ mod tests {
     use super::*;
     use std::fs::File;
     use std::io::Cursor;
+    use bincode::serde::{decode_from_slice, encode_into_slice};
 
     const DISK1: &str = "tests/fixtures/disk1.img";
     const DISK2: &str = "tests/fixtures/disk2.img";
 
     #[test]
     fn deserialize_maximum_chs_value() {
-        let chs: CHS = bincode::deserialize(&[0xff, 0xff, 0xff]).unwrap();
+        let chs: CHS = decode_from_slice(&[0xff, 0xff, 0xff], legacy()).unwrap().0;
         assert_eq!(
             chs,
             CHS {
@@ -1533,13 +1540,16 @@ mod tests {
             head: 255,
             sector: 63,
         };
-        let out = bincode::serialize(&chs).unwrap();
-        assert_eq!(out, &[0xff, 0xff, 0xff]);
+        let mut slice = [0; 3];
+        encode_into_slice(&chs, &mut slice, legacy()).unwrap();
+        for element in slice {
+            assert_eq!(element, 0xff);
+        }
     }
 
     #[test]
     fn serialize_and_deserialize_some_chs_value() {
-        let chs: CHS = bincode::deserialize(&[0xaa, 0xaa, 0xaa]).unwrap();
+        let chs: CHS = decode_from_slice(&[0xaa, 0xaa, 0xaa], legacy()).unwrap().0;
         assert_eq!(
             chs,
             CHS {
@@ -1548,8 +1558,11 @@ mod tests {
                 sector: 42,
             }
         );
-        let out = bincode::serialize(&chs).unwrap();
-        assert_eq!(out, &[0xaa, 0xaa, 0xaa]);
+        let mut slice = [0; 3];
+        encode_into_slice(&chs, &mut slice, legacy()).unwrap();
+        for element in slice {
+            assert_eq!(element, 0xaa);
+        }
     }
 
     #[test]
