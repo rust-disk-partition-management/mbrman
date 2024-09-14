@@ -456,7 +456,7 @@ impl MBR {
                 });
 
                 if next.starting_lba > 0 && relative_ebr_lba >= next.starting_lba {
-                    return Err(Error::from(Error::InconsistentEBR));
+                    return Err(Error::InconsistentEBR);
                 }
 
                 relative_ebr_lba = next.starting_lba;
