@@ -596,7 +596,7 @@ impl MBR {
                             sectors: next.ebr_sectors.unwrap(),
                         },
                         &mut writer,
-                        legacy()
+                        legacy(),
                     )?;
                 } else {
                     encode_into_std_write(&MBRPartitionEntry::empty(), &mut writer, legacy())?;
@@ -1513,9 +1513,9 @@ impl Serialize for CHS {
 #[allow(clippy::cognitive_complexity)]
 mod tests {
     use super::*;
+    use bincode::serde::{decode_from_slice, encode_into_slice};
     use std::fs::File;
     use std::io::Cursor;
-    use bincode::serde::{decode_from_slice, encode_into_slice};
 
     const DISK1: &str = "tests/fixtures/disk1.img";
     const DISK2: &str = "tests/fixtures/disk2.img";
