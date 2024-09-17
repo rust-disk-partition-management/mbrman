@@ -407,9 +407,9 @@ impl MBR {
     /// let mbr = mbrman::MBR::read_from(&mut f, 512)
     ///     .expect("could not read the partition table");
     /// ```
-    pub fn read_from<R: ?Sized>(mut reader: &mut R, sector_size: u32) -> Result<MBR>
+    pub fn read_from<R>(mut reader: &mut R, sector_size: u32) -> Result<MBR>
     where
-        R: Read + Seek,
+        R: Read + Seek + ?Sized,
     {
         let disk_size = u32::try_from(reader.seek(SeekFrom::End(0))? / u64::from(sector_size))
             .unwrap_or(u32::MAX);
@@ -542,9 +542,9 @@ impl MBR {
     /// mbr.write_into(&mut cur)
     ///     .expect("could not write MBR to disk")
     /// ```
-    pub fn write_into<W: ?Sized>(&mut self, mut writer: &mut W) -> Result<()>
+    pub fn write_into<W>(&mut self, mut writer: &mut W) -> Result<()>
     where
-        W: Write + Seek,
+        W: Write + Seek + ?Sized,
     {
         self.header.write_into(&mut writer)?;
 
@@ -581,7 +581,7 @@ impl MBR {
                 writer.seek(SeekFrom::Start(u64::from(
                     l.absolute_ebr_lba * self.sector_size,
                 )))?;
-                encode_into_std_write(&BootstrapCode446(l.bootstrap_code), &mut writer, legacy())?;
+                encode_into_std_write(BootstrapCode446(l.bootstrap_code), &mut writer, legacy())?;
                 encode_into_std_write(&partition, &mut writer, legacy())?;
                 if let Some(next) = next {
                     encode_into_std_write(
@@ -599,10 +599,10 @@ impl MBR {
                         legacy(),
                     )?;
                 } else {
-                    encode_into_std_write(&MBRPartitionEntry::empty(), &mut writer, legacy())?;
+                    encode_into_std_write(MBRPartitionEntry::empty(), &mut writer, legacy())?;
                 }
                 writer.write_all(&[0; 16 * 2])?;
-                encode_into_std_write(&BOOT_SIGNATURE, &mut writer, legacy())?;
+                encode_into_std_write(BOOT_SIGNATURE, &mut writer, legacy())?;
             }
         }
 
@@ -1079,9 +1079,9 @@ impl MBRHeader {
 
     /// Attempt to read a MBR header from a reader.  This operation will seek at the
     /// correct location before trying to write to disk.
-    pub fn read_from<R: ?Sized>(mut reader: &mut R) -> Result<MBRHeader>
+    pub fn read_from<R>(mut reader: &mut R) -> Result<MBRHeader>
     where
-        R: Read + Seek,
+        R: Read + Seek + ?Sized,
     {
         reader.seek(SeekFrom::Start(0))?;
         let header: Self = decode_from_std_read(&mut reader, legacy())?;
@@ -1105,13 +1105,13 @@ impl MBRHeader {
 
     /// Write the MBR header into a writer. This operation will seek at the
     /// correct location before trying to write to disk.
-    pub fn write_into<W: ?Sized>(&self, mut writer: &mut W) -> Result<()>
+    pub fn write_into<W>(&self, mut writer: &mut W) -> Result<()>
     where
-        W: Write + Seek,
+        W: Write + Seek + ?Sized,
     {
         self.check()?;
         writer.seek(SeekFrom::Start(0))?;
-        encode_into_std_write(&self, &mut writer, legacy())?;
+        encode_into_std_write(self, &mut writer, legacy())?;
 
         Ok(())
     }
@@ -1541,7 +1541,7 @@ mod tests {
             sector: 63,
         };
         let mut slice = [0; 3];
-        encode_into_slice(&chs, &mut slice, legacy()).unwrap();
+        encode_into_slice(chs, &mut slice, legacy()).unwrap();
         for element in slice {
             assert_eq!(element, 0xff);
         }
@@ -1559,7 +1559,7 @@ mod tests {
             }
         );
         let mut slice = [0; 3];
-        encode_into_slice(&chs, &mut slice, legacy()).unwrap();
+        encode_into_slice(chs, &mut slice, legacy()).unwrap();
         for element in slice {
             assert_eq!(element, 0xaa);
         }
@@ -1665,7 +1665,7 @@ mod tests {
         assert_eq!(
             CHS::from_lba_exact(
                 mbr.logical_partitions[2].partition.starting_lba,
-                u16::max_value(),
+                u16::MAX,
                 2,
                 3
             )
@@ -2000,7 +2000,8 @@ mod tests {
         mbr.header.partition_1.sys = 0x0f;
         mbr.header.partition_1.starting_lba = 1;
         mbr.header.partition_1.sectors = 10;
-        mbr.push(0x0f, 1, 9).unwrap().partition.boot = BOOT_ACTIVE | 0x01;
+        let partition = mbr.push(0x0f, 1, 9).unwrap();
+        partition.partition.boot = BOOT_ACTIVE | 0x01;
         assert!(matches!(
             mbr.write_into(&mut cur).unwrap_err(),
             Error::InvalidBootFlag
