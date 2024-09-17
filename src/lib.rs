@@ -156,6 +156,9 @@
 
 #![deny(missing_docs)]
 
+use bincode::config::legacy;
+use bincode::error::{DecodeError, EncodeError};
+use bincode::serde::{decode_from_std_read, encode_into_std_write};
 use bitvec::prelude::*;
 use serde::de::{SeqAccess, Visitor};
 use serde::ser::SerializeTuple;
@@ -164,9 +167,6 @@ use serde_big_array::BigArray;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::iter::{once, repeat};
 use std::ops::{Index, IndexMut};
-use bincode::config::legacy;
-use bincode::error::{DecodeError, EncodeError};
-use bincode::serde::{decode_from_std_read, encode_into_std_write};
 use thiserror::Error;
 
 const DEFAULT_ALIGN: u32 = 2048;
