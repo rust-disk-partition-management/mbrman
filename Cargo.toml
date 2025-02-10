@@ -1,6 +1,6 @@
 [package]
 name = "mbrman"
-version = "0.5.2"
+version = "0.5.3"
 authors = ["Cecile Tonglet <cecile.tonglet@cecton.com>"]
 edition = "2021"
 rust-version = "1.56"
