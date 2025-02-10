@@ -23,8 +23,10 @@ jobs:
           - msrv
         include:
           - os: ubuntu-latest
-            rust: stable
+            rust: msrv
             lint: 1
+          - rust: stable
+            rust-args: --all-features
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout source
@@ -37,8 +39,9 @@ jobs:
           if [ "$ver" = msrv ]; then
               ver=$(cargo metadata --format-version 1 --no-deps | \
                   jq -r '.packages[0].rust_version')
+              extra=(-c rustfmt -c clippy)
           fi
-          rustup toolchain install "$ver" --profile minimal --no-self-update
+          rustup toolchain install "$ver" --profile minimal --no-self-update "${extra[@]}"
           rustup default "$ver"
           echo "Installed:"
           cargo --version
@@ -47,7 +50,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: cargo test
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace ${{ matrix.rust-args }}
 
       - name: rustfmt
         if: github.event_name == 'pull_request' && matrix.lint
