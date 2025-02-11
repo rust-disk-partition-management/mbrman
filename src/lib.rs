@@ -479,6 +479,18 @@ impl MBR {
         })
     }
 
+    /// Updates the header to match the specifications of the seeker given in argument.
+    /// `disk_size` will be updated after this operation.
+    pub fn update_from<S: ?Sized>(&mut self, seeker: &mut S) -> Result<()>
+    where
+        S: Seek,
+    {
+        self.disk_size =
+            u32::try_from(seeker.seek(SeekFrom::End(0))? / u64::from(self.sector_size))
+                .unwrap_or(u32::max_value());
+        Ok(())
+    }
+
     fn find_alignment(header: &MBRHeader, logical_partitions: &[LogicalPartition]) -> u32 {
         let lbas = header
             .iter()
@@ -1992,6 +2004,20 @@ mod tests {
             mbr.write_into(&mut cur).unwrap_err(),
             Error::InvalidBootFlag
         ));
+    }
+
+    #[test]
+    fn update_from() {
+        let ss = 512_u32;
+        let data = vec![0; 10 * ss as usize];
+        let mut cur = Cursor::new(data);
+        let mut mbr = MBR::new_from(&mut cur, ss, [0xff; 4]).unwrap();
+        assert_eq!(mbr.disk_size, 10);
+        let mut data = cur.into_inner();
+        data.resize(20 * ss as usize, 0);
+        let mut cur = Cursor::new(data);
+        mbr.update_from(&mut cur).unwrap();
+        assert_eq!(mbr.disk_size, 20);
     }
 }
 
