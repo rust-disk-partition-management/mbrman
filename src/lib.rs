@@ -374,10 +374,10 @@ impl MBR {
     /// ```
     pub fn new_from<S>(seeker: &mut S, sector_size: u32, disk_signature: [u8; 4]) -> Result<MBR>
     where
-        S: Seek,
+        S: Seek + ?Sized,
     {
         let disk_size = u32::try_from(seeker.seek(SeekFrom::End(0))? / u64::from(sector_size))
-            .unwrap_or(u32::max_value());
+            .unwrap_or(u32::MAX);
         let header = MBRHeader::new(disk_signature);
 
         Ok(MBR {
@@ -402,12 +402,12 @@ impl MBR {
     /// let mbr = mbrman::MBR::read_from(&mut f, 512)
     ///     .expect("could not read the partition table");
     /// ```
-    pub fn read_from<R: ?Sized>(mut reader: &mut R, sector_size: u32) -> Result<MBR>
+    pub fn read_from<S>(mut reader: &mut S, sector_size: u32) -> Result<MBR>
     where
-        R: Read + Seek,
+        S: Read + Seek + ?Sized,
     {
         let disk_size = u32::try_from(reader.seek(SeekFrom::End(0))? / u64::from(sector_size))
-            .unwrap_or(u32::max_value());
+            .unwrap_or(u32::MAX);
         let header = MBRHeader::read_from(&mut reader)?;
 
         let mut logical_partitions = Vec::new();
@@ -537,9 +537,9 @@ impl MBR {
     /// mbr.write_into(&mut cur)
     ///     .expect("could not write MBR to disk")
     /// ```
-    pub fn write_into<W: ?Sized>(&mut self, mut writer: &mut W) -> Result<()>
+    pub fn write_into<W>(&mut self, mut writer: &mut W) -> Result<()>
     where
-        W: Write + Seek,
+        W: Write + Seek + ?Sized,
     {
         self.header.write_into(&mut writer)?;
 
@@ -735,7 +735,7 @@ impl MBR {
     /// given in parameter.
     /// This function will automatically align with the alignment defined in the `MBR`.
     ///
-    /// # Examples:
+    /// # Examples
     /// Basic usage:
     /// ```
     /// let ss = 512;
@@ -770,7 +770,7 @@ impl MBR {
     /// given in parameter.
     /// This function will automatically align with the alignment defined in the `MBR`.
     ///
-    /// # Examples:
+    /// # Examples
     /// Basic usage:
     /// ```
     /// let ss = 512;
@@ -806,7 +806,7 @@ impl MBR {
     /// partition of the size given in parameter.
     /// This function will automatically align with the alignment defined in the `MBR`.
     ///
-    /// # Examples:
+    /// # Examples
     /// Basic usage:
     /// ```
     /// let ss = 512;
@@ -845,7 +845,7 @@ impl MBR {
     /// Get the maximum size (in sectors) of a partition you could create in the MBR.
     /// This function will automatically align with the alignment defined in the `MBR`.
     ///
-    /// # Examples:
+    /// # Examples
     /// Basic usage:
     /// ```
     /// let ss = 512;
@@ -1073,9 +1073,9 @@ impl MBRHeader {
 
     /// Attempt to read a MBR header from a reader.  This operation will seek at the
     /// correct location before trying to write to disk.
-    pub fn read_from<R: ?Sized>(mut reader: &mut R) -> Result<MBRHeader>
+    pub fn read_from<R>(mut reader: &mut R) -> Result<MBRHeader>
     where
-        R: Read + Seek,
+        R: Read + Seek + ?Sized,
     {
         reader.seek(SeekFrom::Start(0))?;
         let header: Self = deserialize_from(&mut reader)?;
@@ -1099,9 +1099,9 @@ impl MBRHeader {
 
     /// Write the MBR header into a writer. This operation will seek at the
     /// correct location before trying to write to disk.
-    pub fn write_into<W: ?Sized>(&self, mut writer: &mut W) -> Result<()>
+    pub fn write_into<W>(&self, mut writer: &mut W) -> Result<()>
     where
-        W: Write + Seek,
+        W: Write + Seek + ?Sized,
     {
         self.check()?;
         writer.seek(SeekFrom::Start(0))?;
@@ -1147,9 +1147,9 @@ struct EBRHeader {
 }
 
 impl EBRHeader {
-    fn read_from<R: ?Sized>(reader: &mut R) -> Result<EBRHeader>
+    fn read_from<R>(reader: &mut R) -> Result<EBRHeader>
     where
-        R: Read,
+        R: Read + ?Sized,
     {
         let header: Self = deserialize_from(reader)?;
         header.check()?;
@@ -1652,7 +1652,7 @@ mod tests {
         assert_eq!(
             CHS::from_lba_exact(
                 mbr.logical_partitions[2].partition.starting_lba,
-                u16::max_value(),
+                u16::MAX,
                 2,
                 3
             )
