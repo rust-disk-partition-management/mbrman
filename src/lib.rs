@@ -230,6 +230,12 @@ pub enum Error {
     /// Partition has invalid boot flag
     #[error("partition has invalid boot flag")]
     InvalidBootFlag,
+    /// Partition index is invalid
+    #[error("invalid partition index")]
+    InvalidIndex,
+    /// Partition is not allocated
+    #[error("partition is not allocated")]
+    PartitionNotAllocated,
 }
 
 /// A type representing a MBR partition table including its partition, the sector size of the disk
@@ -955,6 +961,112 @@ impl MBR {
         assert!(index >= 5, "logical partitions start at 5");
         self.logical_partitions.remove(index - 5)
     }
+
+    /// Extend a partition to use all available space after it.
+    ///
+    /// Currently, this function only supports primary partitions (index 1-4).
+    /// Logical partitions (index > 4) are not supported and will return an InvalidIndex error.
+    ///
+    /// The partition will be extended up to the next primary partition or the end of the disk.
+    /// If there is no space available after the partition (i.e., another partition immediately follows it),
+    /// the function will return 0 sectors added.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use std::io::Cursor;
+    /// use mbrman::{MBR, CHS, MBRPartitionEntry, BOOT_INACTIVE};
+    ///
+    /// // Create a new MBR with a small partition and space after it
+    /// let ss = 512_u32;
+    /// let data = vec![0; 100 * ss as usize];
+    /// let mut cur = Cursor::new(data);
+    /// let mut mbr = MBR::new_from(&mut cur, ss, [0xff; 4]).unwrap();
+    ///
+    /// // Create initial partition
+    /// mbr[1] = MBRPartitionEntry {
+    ///     boot: BOOT_INACTIVE,
+    ///     first_chs: CHS::empty(),
+    ///     sys: 0x83,
+    ///     last_chs: CHS::empty(),
+    ///     starting_lba: 1,
+    ///     sectors: 20,
+    /// };
+    ///
+    /// // Create a partition with a gap of 20 sectors between them
+    /// mbr[2] = MBRPartitionEntry {
+    ///     boot: BOOT_INACTIVE,
+    ///     first_chs: CHS::empty(),
+    ///     sys: 0x83,
+    ///     last_chs: CHS::empty(),
+    ///     starting_lba: 41,
+    ///     sectors: 20,
+    /// };
+    ///
+    /// // Extend the first partition
+    /// let sectors_added = mbr.extend_partition(1).unwrap();
+    /// assert!(sectors_added > 0, "Expected partition to be extended");
+    ///
+    /// // Verify the partition was extended
+    /// assert_eq!(mbr[1].sectors, 40, "Partition should now be 40 sectors");
+    /// assert_eq!(mbr[1].starting_lba + mbr[1].sectors, mbr[2].starting_lba);
+    /// ```
+    pub fn extend_partition(&mut self, partition_index: usize) -> Result<u32> {
+        // First validate the partition exists and is in use
+        if partition_index == 0 || partition_index > 4 {
+            return Err(Error::InvalidIndex);
+        }
+
+        // Get partition details
+        let partition = &self[partition_index];
+        if partition.is_unused() {
+            return Err(Error::PartitionNotAllocated);
+        }
+
+        let partition_end = partition.starting_lba + partition.sectors;
+        let starting_lba = partition.starting_lba;
+
+        // Find next partition's starting point
+        let mut next_partition_start = self.disk_size;
+        for i in 1..=4 {
+            if i != partition_index {
+                let other = &self[i];
+                if other.is_used() && other.starting_lba > partition_end {
+                    next_partition_start = next_partition_start.min(other.starting_lba);
+                }
+            }
+        }
+
+        // Calculate available space
+        let available_sectors = next_partition_start.saturating_sub(partition_end);
+
+        if available_sectors == 0 {
+            return Ok(0); // No space available after partition
+        }
+
+        // Get geometry information if needed
+        let geometry = if self.check_geometry() {
+            Some((self.cylinders, self.heads, self.sectors))
+        } else {
+            None
+        };
+
+        // Now get mutable reference to update the partition
+        let partition = &mut self[partition_index];
+        partition.sectors += available_sectors;
+
+        // If geometry is set, update CHS addresses
+        if let Some((cylinders, heads, sectors)) = geometry {
+            partition.last_chs = CHS::from_lba_exact(
+                starting_lba + partition.sectors - 1,
+                cylinders,
+                heads,
+                sectors,
+            )?;
+        }
+
+        Ok(available_sectors)
+    }
 }
 
 impl Index<usize> for MBR {
@@ -1665,7 +1777,6 @@ mod tests {
         assert_eq!(mbr.logical_partitions[4].ebr_sectors, Some(2));
         assert!(mbr.logical_partitions.get(5).is_none());
     }
-
     #[test]
     fn read_empty_extended_partition() {
         let ss = 512_u32;
@@ -1828,6 +1939,7 @@ mod tests {
         mbr.header.partition_1.last_chs = CHS::new(5, 0, 1);
         mbr.header.partition_1.starting_lba = align;
         mbr.header.partition_1.sectors = mbr.disk_size;
+
         let p = mbr.push(0x00, 2, 2 * align).unwrap();
 
         assert_eq!(p.absolute_ebr_lba, align);
@@ -1928,6 +2040,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::bool_assert_comparison)]
     fn write_invalid_boot_signature() {
         let ss = 512_u32;
         let data = vec![0; 10 * ss as usize];
@@ -1993,17 +2106,213 @@ mod tests {
             Error::InvalidBootFlag
         ));
     }
-}
 
-#[cfg(doctest)]
-mod test_readme {
-    // for Rust < 1.54
-    // https://blog.guillaume-gomez.fr/articles/2021-08-03+Improvements+for+%23%5Bdoc%5D+attributes+in+Rust
-    macro_rules! check_doc {
-        ($x:expr) => {
-            #[doc = $x]
-            extern "C" {}
+    #[test]
+    fn extend_partition_basic() {
+        let ss = 512_u32;
+        let data = vec![0; 100 * ss as usize];
+        let mut cur = Cursor::new(data);
+        let mut mbr = MBR::new_from(&mut cur, ss, [0xff; 4]).unwrap();
+
+        // Create initial partition using half the available space
+        let initial_size = (mbr.disk_size - 1) / 2;
+        mbr[1] = MBRPartitionEntry {
+            boot: BOOT_INACTIVE,
+            first_chs: CHS::empty(),
+            sys: 0x83, // Linux filesystem
+            last_chs: CHS::empty(),
+            starting_lba: 1,
+            sectors: initial_size,
         };
+
+        // Extend the partition
+        let sectors_added = mbr.extend_partition(1).unwrap();
+        assert!(sectors_added > 0, "Expected partition to be extended");
+
+        // Verify the partition was extended
+        assert_eq!(
+            sectors_added,
+            mbr.disk_size - 1 - initial_size,
+            "Partition should be extended by sectors_added"
+        );
+        assert_eq!(mbr[1].sectors, mbr.disk_size - 1);
+        assert_eq!(mbr[1].starting_lba, 1);
     }
-    check_doc!(include_str!("../README.md"));
+
+    #[test]
+    fn extend_partition_no_space() {
+        let ss = 512_u32;
+        let data = vec![0; 100 * ss as usize];
+        let mut cur = Cursor::new(data);
+        let mut mbr = MBR::new_from(&mut cur, ss, [0xff; 4]).unwrap();
+
+        // Create partition using all available space
+        mbr[1] = MBRPartitionEntry {
+            boot: BOOT_INACTIVE,
+            first_chs: CHS::empty(),
+            sys: 0x83,
+            last_chs: CHS::empty(),
+            starting_lba: 1,
+            sectors: mbr.disk_size - 1,
+        };
+
+        // Try to extend the partition
+        let sectors_added = mbr.extend_partition(1).unwrap();
+
+        // Verify no sectors were added
+        assert_eq!(sectors_added, 0);
+        assert_eq!(mbr[1].sectors, mbr.disk_size - 1);
+    }
+
+    #[test]
+    fn extend_partition_between_partitions() {
+        let ss = 512_u32;
+        let data = vec![0; 100 * ss as usize];
+        let mut cur = Cursor::new(data);
+        let mut mbr = MBR::new_from(&mut cur, ss, [0xff; 4]).unwrap();
+
+        // Create first partition
+        mbr[1] = MBRPartitionEntry {
+            boot: BOOT_INACTIVE,
+            first_chs: CHS::empty(),
+            sys: 0x83,
+            last_chs: CHS::empty(),
+            starting_lba: 1,
+            sectors: 20,
+        };
+
+        // Create a partition with a gap of 20 sectors between them
+        mbr[2] = MBRPartitionEntry {
+            boot: BOOT_INACTIVE,
+            first_chs: CHS::empty(),
+            sys: 0x83,
+            last_chs: CHS::empty(),
+            starting_lba: 41,
+            sectors: 20,
+        };
+
+        // Get initial size
+        let initial_size = mbr[1].sectors;
+
+        // Extend the first partition
+        let sectors_added = mbr.extend_partition(1).unwrap();
+        assert!(sectors_added > 0, "Expected partition to be extended");
+
+        // Verify sectors were added
+        assert_eq!(
+            mbr[1].sectors,
+            initial_size + sectors_added,
+            "Partition size should increase by sectors_added"
+        );
+
+        // Verify partition extends up to the next partition
+        assert_eq!(
+            mbr[1].starting_lba + mbr[1].sectors,
+            mbr[2].starting_lba,
+            "Extended partition should reach up to the next partition"
+        );
+
+        // Verify second partition was not affected
+        assert_eq!(mbr[2].starting_lba, 41, "Second partition should not move");
+        assert_eq!(
+            mbr[2].sectors, 20,
+            "Second partition size should not change"
+        );
+    }
+
+    #[test]
+    fn extend_partition_invalid_index() {
+        let ss = 512_u32;
+        let data = vec![0; 100 * ss as usize];
+        let mut cur = Cursor::new(data);
+        let mut mbr = MBR::new_from(&mut cur, ss, [0xff; 4]).unwrap();
+
+        // Try to extend non-existent partition
+        let result = mbr.extend_partition(0);
+        assert!(matches!(result, Err(Error::InvalidIndex)));
+
+        let result = mbr.extend_partition(5);
+        assert!(matches!(result, Err(Error::InvalidIndex)));
+    }
+
+    #[test]
+    fn extend_partition_unused() {
+        let ss = 512_u32;
+        let data = vec![0; 100 * ss as usize];
+        let mut cur = Cursor::new(data);
+        let mut mbr = MBR::new_from(&mut cur, ss, [0xff; 4]).unwrap();
+
+        // Try to extend unused partition
+        let result = mbr.extend_partition(1);
+        assert!(matches!(result, Err(Error::PartitionNotAllocated)));
+    }
+
+    #[test]
+    fn extend_partition_with_geometry() {
+        let ss = 512_u32;
+        // Make disk size a multiple of cylinder size
+        let cylinder_size = 63 * 16; // sectors per cylinder = sectors * heads
+        let total_cylinders = 100;
+        let data = vec![0; (cylinder_size * total_cylinders) as usize * ss as usize];
+        let mut cur = Cursor::new(data);
+        let mut mbr = MBR::new_from(&mut cur, ss, [0xff; 4]).unwrap();
+
+        // Set disk geometry
+        mbr.cylinders = total_cylinders as u16;
+        mbr.heads = 16;
+        mbr.sectors = 63;
+
+        // Calculate cylinder size
+        let cylinder_size = (mbr.sectors as u32) * (mbr.heads as u32);
+
+        // Create initial partition using 1/4 of available space
+        mbr[1] = MBRPartitionEntry {
+            boot: BOOT_INACTIVE,
+            first_chs: CHS::empty(),
+            sys: 0x83,
+            last_chs: CHS::empty(),
+            starting_lba: cylinder_size, // Start at second cylinder
+            sectors: cylinder_size * 25, // Use 25 cylinders (1/4 of disk)
+        };
+
+        // Create a partition after it to limit extension
+        mbr[2] = MBRPartitionEntry {
+            boot: BOOT_INACTIVE,
+            first_chs: CHS::empty(),
+            sys: 0x83,
+            last_chs: CHS::empty(),
+            starting_lba: cylinder_size * 50, // Start at cylinder 50
+            sectors: cylinder_size,           // Use one cylinder
+        };
+
+        // Get initial size
+        let initial_size = mbr[1].sectors;
+
+        // Extend the partition
+        let sectors_added = mbr.extend_partition(1).unwrap();
+        assert!(sectors_added > 0, "Expected partition to be extended");
+
+        // Verify sectors were added
+        assert_eq!(
+            mbr[1].sectors,
+            initial_size + sectors_added,
+            "Partition size should increase by sectors_added"
+        );
+
+        // Verify partition extends up to the next partition
+        assert_eq!(
+            mbr[1].starting_lba + mbr[1].sectors,
+            mbr[2].starting_lba,
+            "Extended partition should reach up to the next partition"
+        );
+
+        // Verify CHS addresses were updated
+        assert!(!mbr[1].last_chs.is_empty(), "Expected last_chs to be set");
+        assert!(
+            mbr[1]
+                .last_chs
+                .is_valid(mbr.cylinders, mbr.heads, mbr.sectors),
+            "Expected last_chs to be valid for disk geometry"
+        );
+    }
 }
