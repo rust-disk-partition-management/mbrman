@@ -883,6 +883,49 @@ impl MBR {
             .ok_or(Error::NoSpaceLeft)
     }
 
+    /// Gets the maximum size (in sectors) a partition can grow to without overlapping another
+    /// partition.
+    /// This function will automatically align with the alignment defined in the `MBR`.
+    ///
+    /// # Examples:
+    /// Basic usage:
+    /// ```
+    /// let ss = 512;
+    /// let data = vec![0; 100 * ss as usize];
+    /// let mut cur = std::io::Cursor::new(data);
+    /// let mut mbr = mbrman::MBR::new_from(&mut cur, ss as u32, [0xff; 4])
+    ///     .expect("could not create partition table");
+    ///
+    /// // NOTE: align to the sectors, so we can use every last one of them
+    /// // NOTE: this is only for the demonstration purpose, this is not recommended
+    /// mbr.align = 1;
+    ///
+    /// mbr[1] = mbrman::MBRPartitionEntry {
+    ///     boot: mbrman::BOOT_INACTIVE,
+    ///     first_chs: mbrman::CHS::empty(),
+    ///     sys: 0x83,
+    ///     last_chs: mbrman::CHS::empty(),
+    ///     starting_lba: mbr.find_optimal_place(1).unwrap(),
+    ///     sectors: 1,
+    /// };
+    ///
+    /// assert_eq!(
+    ///     mbr.get_maximum_partition_size_for(1)
+    ///         .expect("could not find a place to put the partition"),
+    ///     mbr.disk_size - 1
+    /// );
+    /// ```
+    pub fn get_maximum_partition_size_for(&mut self, i: usize) -> Result<u32> {
+        let spots = self.find_free_sectors();
+        let p = self.get_mut(i).ok_or(Error::PartitionNotFound)?;
+        let free_sectors = spots
+            .into_iter()
+            .find(|(i, _)| *i == p.starting_lba + p.sectors)
+            .map(|(_, l)| l)
+            .unwrap_or(0);
+        Ok(p.sectors + free_sectors)
+    }
+
     /// Push a new logical partition to the end of the extended partition list. This function will
     /// take care of creating the EBR for you. The EBR will be located at `starting_lba` (provided
     /// in input) and the logical partition itself will be located a block further to stay
