@@ -26,6 +26,8 @@ jobs:
           - os: ubuntu-latest
             rust: msrv
             lint: 1
+          - rust: msrv
+            rust-args: --all-features
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout source
@@ -48,7 +50,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - run: cargo test --workspace --all-features
+      - name: Set serde-big-array to minimum version (0.4.1)
+        if: matrix.rust == 'msrv'
+        run: cargo update -p serde-big-array --precise 0.4.1
+
+      - run: cargo test --workspace ${{ matrix.rust-args }}
 
       - run: cargo fmt --all -- --check
         if: github.event_name == 'pull_request' && matrix.lint
