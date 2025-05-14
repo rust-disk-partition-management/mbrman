@@ -50,10 +50,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Set serde-big-array to minimum version (0.4.1)
-        if: matrix.rust == 'msrv'
-        run: cargo update -p serde-big-array --precise 0.4.1
-
       - run: cargo test --workspace ${{ matrix.rust-args }}
 
       - run: cargo fmt --all -- --check
