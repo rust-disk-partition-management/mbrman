@@ -13,6 +13,7 @@ env:
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
         os:
           - ubuntu-latest
@@ -23,7 +24,7 @@ jobs:
           - msrv
         include:
           - os: ubuntu-latest
-            rust: stable
+            rust: msrv
             lint: 1
     runs-on: ${{ matrix.os }}
     steps:
@@ -36,9 +37,10 @@ jobs:
           ver="${{ matrix.rust }}"
           if [ "$ver" = msrv ]; then
               ver=$(cargo metadata --format-version 1 --no-deps | \
-                  jq -r '.packages[0].rust_version')
+                  jq -r 'first(.packages[] | select(.rust_version != null).rust_version)')
+              extra=(-c rustfmt -c clippy)
           fi
-          rustup toolchain install "$ver" --profile minimal --no-self-update
+          rustup toolchain install "$ver" --profile minimal --no-self-update "${extra[@]}"
           rustup default "$ver"
           echo "Installed:"
           cargo --version
@@ -46,13 +48,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: cargo test
-        run: cargo test --workspace --all-features
+      - run: cargo test --workspace --all-features
 
-      - name: rustfmt
+      - run: cargo fmt --all -- --check
         if: github.event_name == 'pull_request' && matrix.lint
-        run: cargo fmt --all -- --check
 
-      - name: clippy
+      - run: cargo clippy --all --tests --all-features -- -D warnings
         if: github.event_name == 'pull_request' && matrix.lint
-        run: cargo clippy --all --tests --all-features -- -D warnings
