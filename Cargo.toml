@@ -3,7 +3,7 @@ name = "mbrman"
 version = "0.5.4"
 authors = ["Cecile Tonglet <cecile.tonglet@cecton.com>"]
 edition = "2021"
-rust-version = "1.56"
+rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 description = "MBR Partition Management in Rust"
 repository = "https://github.com/rust-disk-partition-management/mbrman"
@@ -18,7 +18,7 @@ include = ["src/**/*.rs", "tests/fixtures/*.img", "README.md", "LICENSE.Apache-2
 
 [dependencies]
 bitvec = "1.0.1"
-bincode = { version = "2.0.0-rc.3", features = ["serde"] }
+bincode = { version = "2.0.1", features = ["serde"] }
 serde = { version = "1.0.210", features = ["derive"] }
 serde-big-array = "0.5.1"
-thiserror = "1.0.63"
+thiserror = "2.0.12"
