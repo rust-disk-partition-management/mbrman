@@ -486,13 +486,13 @@ impl MBR {
 
     /// Updates the header to match the specifications of the seeker given in argument.
     /// `disk_size` will be updated after this operation.
-    pub fn update_from<S: ?Sized>(&mut self, seeker: &mut S) -> Result<()>
+    pub fn update_from<S>(&mut self, seeker: &mut S) -> Result<()>
     where
-        S: Seek,
+        S: Seek + ?Sized,
     {
         self.disk_size =
             u32::try_from(seeker.seek(SeekFrom::End(0))? / u64::from(self.sector_size))
-                .unwrap_or(u32::max_value());
+                .unwrap_or(u32::MAX);
         Ok(())
     }
 
