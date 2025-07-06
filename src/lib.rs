@@ -427,9 +427,9 @@ impl MBR {
             let mut ebr_first_chs = extended.first_chs;
             let mut ebr_last_chs = None;
             loop {
-                reader.seek(SeekFrom::Start(u64::from(
-                    (extended.starting_lba + relative_ebr_lba) * sector_size,
-                )))?;
+                let offset =
+                    (extended.starting_lba as u64 + relative_ebr_lba as u64) * sector_size as u64;
+                reader.seek(SeekFrom::Start(offset))?;
                 let (partition, next, bootstrap_code) = match EBRHeader::read_from(&mut reader) {
                     Ok(ebr) => ebr.unwrap(),
                     Err(err) => {
