@@ -161,6 +161,7 @@ use std::iter::once;
 use std::mem::MaybeUninit;
 use std::ops::{Index, IndexMut};
 use thiserror::Error;
+use wincode::config::ConfigCore;
 use wincode::{ReadError, SchemaRead, SchemaWrite, WriteError};
 
 const DEFAULT_ALIGN: u32 = 2048;
@@ -180,7 +181,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 fn encode_into_std_write<T, W>(src: &T, writer: &mut W) -> Result<()>
 where
-    T: SchemaWrite<Src = T>,
+    T: wincode::Serialize<Src = T>,
     W: Write + ?Sized,
 {
     let buf = wincode::serialize(src)?;
@@ -190,7 +191,7 @@ where
 /// Read exactly one boot record (MBR or EBR sector) and decode it.
 fn decode_boot_record<T, R>(reader: &mut R) -> Result<T>
 where
-    T: for<'de> SchemaRead<'de, Dst = T>,
+    T: for<'de> wincode::Deserialize<'de, Dst = T>,
     R: Read + ?Sized,
 {
     let mut buf = [0; BOOT_RECORD_SIZE];
@@ -216,7 +217,7 @@ pub enum Error {
     #[error("deserialization failed")]
     Deserialize(#[from] ReadError),
     /// Serialization errors.
-    #[error("Serialization failed")]
+    #[error("serialization failed")]
     Serialize(#[from] WriteError),
     /// I/O errors.
     #[error("generic I/O error")]
@@ -448,15 +449,10 @@ impl MBR {
                 reader.seek(SeekFrom::Start(offset))?;
                 let (partition, next, bootstrap_code) = match EBRHeader::read_from(&mut reader) {
                     Ok(ebr) => ebr.unwrap(),
-                    Err(err) => {
-                        if relative_ebr_lba == 0 {
-                            // NOTE: if the extended partition is empty, it is not required that an
-                            //       EBR exists
-                            break;
-                        } else {
-                            return Err(err);
-                        }
-                    }
+                    // NOTE: if the extended partition is empty, it is not required that an
+                    //       EBR exists
+                    Err(Error::InvalidSignature) if relative_ebr_lba == 0 => break,
+                    Err(err) => return Err(err),
                 };
                 let absolute_ebr_lba = extended.starting_lba + relative_ebr_lba;
                 logical_partitions.push(LogicalPartition {
@@ -1531,28 +1527,32 @@ impl CHS {
     }
 }
 
-impl<'de> SchemaRead<'de> for CHS {
+// SAFETY: `TYPE_META` is left at its default `TypeMeta::Dynamic` (no static size or
+// zero-copy claim), and `read` initializes `dst` only when it returns `Ok`: it reads the
+// 3 bytes first and writes `dst` last, so `dst` is left untouched on error.
+unsafe impl<'de, C: ConfigCore> SchemaRead<'de, C> for CHS {
     type Dst = CHS;
 
     fn read(
-        reader: &mut impl wincode::io::Reader<'de>,
+        mut reader: impl wincode::io::Reader<'de>,
         dst: &mut MaybeUninit<Self::Dst>,
     ) -> wincode::ReadResult<()> {
-        let bytes = *reader.fill_array::<3>()?;
-        reader.consume(3)?;
+        let bytes = reader.take_array::<3>()?;
         dst.write(CHS::from_bytes(bytes));
         Ok(())
     }
 }
 
-impl SchemaWrite for CHS {
+// SAFETY: `TYPE_META` is left at its default `TypeMeta::Dynamic`, and `size_of` returns 3,
+// exactly the number of bytes `write` emits (one fixed 3-byte array).
+unsafe impl<C: ConfigCore> SchemaWrite<C> for CHS {
     type Src = CHS;
 
     fn size_of(_: &Self::Src) -> wincode::WriteResult<usize> {
         Ok(3)
     }
 
-    fn write(writer: &mut impl wincode::io::Writer, src: &Self::Src) -> wincode::WriteResult<()> {
+    fn write(mut writer: impl wincode::io::Writer, src: &Self::Src) -> wincode::WriteResult<()> {
         Ok(writer.write(&src.to_bytes())?)
     }
 }
@@ -1743,6 +1743,46 @@ mod tests {
         assert_eq!(mbr.header.partition_1.starting_lba, 1);
         assert_eq!(mbr.header.partition_1.sectors, 10);
         assert!(mbr.logical_partitions.is_empty());
+    }
+
+    #[test]
+    fn read_extended_partition_with_unreadable_first_ebr() {
+        let ss = 512_u32;
+        let data = vec![0; 10 * ss as usize];
+        let mut cur = Cursor::new(data);
+        let mut mbr = MBR::new_from(&mut cur, ss, [0xff; 4]).unwrap();
+        // the first EBR would be past the end of the disk
+        mbr.header.partition_1.sys = 0x0f;
+        mbr.header.partition_1.starting_lba = 20;
+        mbr.header.partition_1.sectors = 10;
+        mbr.write_into(&mut cur).unwrap();
+
+        assert!(matches!(
+            MBR::read_from(&mut cur, ss),
+            Err(Error::Io(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof
+        ));
+    }
+
+    #[test]
+    fn read_extended_partition_with_invalid_first_ebr_entry() {
+        let ss = 512_u32;
+        let data = vec![0; 10 * ss as usize];
+        let mut cur = Cursor::new(data);
+        let mut mbr = MBR::new_from(&mut cur, ss, [0xff; 4]).unwrap();
+        mbr.header.partition_1.sys = 0x0f;
+        mbr.header.partition_1.starting_lba = 1;
+        mbr.header.partition_1.sectors = 9;
+        mbr.write_into(&mut cur).unwrap();
+
+        // valid signature, but the first entry has a boot flag that is neither 0x00 nor 0x80
+        let ebr = cur.get_mut();
+        ebr[ss as usize + 446] = 0x01;
+        ebr[ss as usize + 510..ss as usize + 512].copy_from_slice(&BOOT_SIGNATURE);
+
+        assert!(matches!(
+            MBR::read_from(&mut cur, ss),
+            Err(Error::InvalidBootFlag)
+        ));
     }
 
     #[test]
