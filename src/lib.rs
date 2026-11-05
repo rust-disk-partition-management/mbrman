@@ -604,27 +604,26 @@ impl MBR {
                 writer.seek(SeekFrom::Start(u64::from(
                     l.absolute_ebr_lba * self.sector_size,
                 )))?;
-                writer.write_all(&l.bootstrap_code)?;
-                encode_into_std_write(&partition, &mut writer)?;
-                if let Some(next) = next {
-                    encode_into_std_write(
-                        &MBRPartitionEntry {
-                            boot: BOOT_INACTIVE,
-                            first_chs: next.ebr_first_chs,
-                            sys: extended.sys,
-                            last_chs: next.ebr_last_chs.unwrap(),
-                            starting_lba: next
-                                .absolute_ebr_lba
-                                .saturating_sub(extended.starting_lba),
-                            sectors: next.ebr_sectors.unwrap(),
-                        },
-                        &mut writer,
-                    )?;
-                } else {
-                    encode_into_std_write(&MBRPartitionEntry::empty(), &mut writer)?;
-                }
-                writer.write_all(&[0; 16 * 2])?;
-                writer.write_all(&BOOT_SIGNATURE)?;
+                let next_ebr = match next {
+                    Some(next) => MBRPartitionEntry {
+                        boot: BOOT_INACTIVE,
+                        first_chs: next.ebr_first_chs,
+                        sys: extended.sys,
+                        last_chs: next.ebr_last_chs.unwrap(),
+                        starting_lba: next.absolute_ebr_lba.saturating_sub(extended.starting_lba),
+                        sectors: next.ebr_sectors.unwrap(),
+                    },
+                    None => MBRPartitionEntry::empty(),
+                };
+                let ebr = EBRHeader {
+                    bootstrap_code: l.bootstrap_code,
+                    partition_1: partition,
+                    partition_2: next_ebr,
+                    _unused_partition_3: [0; 16],
+                    _unused_partition_4: [0; 16],
+                    boot_signature: BOOT_SIGNATURE,
+                };
+                encode_into_std_write(&ebr, &mut writer)?;
             }
         }
 
@@ -1205,7 +1204,7 @@ impl IndexMut<usize> for MBRHeader {
     }
 }
 
-#[derive(Debug, Clone, SchemaRead)]
+#[derive(Debug, Clone, SchemaRead, SchemaWrite)]
 struct EBRHeader {
     bootstrap_code: [u8; 446],
     partition_1: MBRPartitionEntry,
@@ -2122,27 +2121,55 @@ mod tests {
             let original = std::fs::read(path).unwrap();
             let ss = 512;
 
-            let mbr = MBR::read_from(&mut Cursor::new(original.clone()), ss).unwrap();
+            let mut mbr = MBR::read_from(&mut Cursor::new(original.clone()), ss).unwrap();
             let mut out = Cursor::new(vec![0; original.len()]);
-            let mut mbr = mbr;
             mbr.write_into(&mut out).unwrap();
             let out = out.into_inner();
 
-            let mut sectors = vec![0_usize];
-            sectors.extend(
+            let mut boot_records = vec![0_usize];
+            boot_records.extend(
                 mbr.logical_partitions
                     .iter()
                     .map(|l| l.absolute_ebr_lba as usize),
             );
-            for lba in sectors {
-                let range = lba * ss as usize..(lba + 1) * ss as usize;
-                assert_eq!(
-                    out[range.clone()],
-                    original[range],
-                    "{path}: sector {lba} differs"
-                );
+            for (lba, (written, expected)) in out
+                .chunks(ss as usize)
+                .zip(original.chunks(ss as usize))
+                .enumerate()
+            {
+                if boot_records.contains(&lba) {
+                    assert_eq!(written, expected, "{path}: sector {lba} differs");
+                } else {
+                    assert!(
+                        written.iter().all(|&b| b == 0),
+                        "{path}: unexpected write in sector {lba}"
+                    );
+                }
             }
         }
+    }
+
+    #[test]
+    fn boot_record_encoded_sizes() {
+        let entry = MBRPartitionEntry::empty();
+        assert_eq!(wincode::serialized_size(&CHS::empty()).unwrap(), 3);
+        assert_eq!(wincode::serialized_size(&entry).unwrap(), 16);
+        assert_eq!(
+            wincode::serialized_size(&MBRHeader::new([0; 4])).unwrap(),
+            BOOT_RECORD_SIZE as u64
+        );
+        let ebr = EBRHeader {
+            bootstrap_code: [0; 446],
+            partition_1: entry.clone(),
+            partition_2: entry,
+            _unused_partition_3: [0; 16],
+            _unused_partition_4: [0; 16],
+            boot_signature: BOOT_SIGNATURE,
+        };
+        assert_eq!(
+            wincode::serialized_size(&ebr).unwrap(),
+            BOOT_RECORD_SIZE as u64
+        );
     }
 
     #[test]
@@ -2159,7 +2186,8 @@ mod tests {
             starting_lba: 4,
             sectors: 60,
         };
-        for (n, sys) in [(4, 0x83), (8, 0x07), (12, 0x0c)] {
+        // each logical partition is 6 sectors: its EBR plus 5 data sectors
+        for (n, sys) in [(4, 0x83), (10, 0x07), (16, 0x0c)] {
             mbr.push(sys, n, 6).unwrap();
         }
         mbr.write_into(&mut cur).unwrap();
