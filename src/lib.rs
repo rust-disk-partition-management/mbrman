@@ -156,23 +156,19 @@
 
 #![deny(missing_docs)]
 
-use bincode::config::legacy;
-use bincode::error::{DecodeError, EncodeError};
-use bincode::serde::{decode_from_std_read, encode_into_std_write};
-use bitvec::prelude::*;
-use serde::de::{SeqAccess, Visitor};
-use serde::ser::SerializeTuple;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_big_array::BigArray;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::iter::{once, repeat};
+use std::iter::once;
+use std::mem::MaybeUninit;
 use std::ops::{Index, IndexMut};
 use thiserror::Error;
+use wincode::{ReadError, SchemaRead, SchemaWrite, WriteError};
 
 const DEFAULT_ALIGN: u32 = 2048;
 const MAX_ALIGN: u32 = 16384;
 const FIRST_USABLE_LBA: u32 = 1;
 const BOOT_SIGNATURE: [u8; 2] = [0x55, 0xaa];
+/// Size in bytes of an MBR or EBR sector on disk.
+const BOOT_RECORD_SIZE: usize = 512;
 
 /// Boot flag for a bootable partition
 pub const BOOT_ACTIVE: u8 = 0x80;
@@ -181,6 +177,26 @@ pub const BOOT_INACTIVE: u8 = 0x00;
 
 /// The result of reading, writing or managing a MBR.
 pub type Result<T> = std::result::Result<T, Error>;
+
+fn encode_into_std_write<T, W>(src: &T, writer: &mut W) -> Result<()>
+where
+    T: SchemaWrite<Src = T>,
+    W: Write + ?Sized,
+{
+    let buf = wincode::serialize(src)?;
+    Ok(writer.write_all(&buf)?)
+}
+
+/// Read exactly one boot record (MBR or EBR sector) and decode it.
+fn decode_boot_record<T, R>(reader: &mut R) -> Result<T>
+where
+    T: for<'de> SchemaRead<'de, Dst = T>,
+    R: Read + ?Sized,
+{
+    let mut buf = [0; BOOT_RECORD_SIZE];
+    reader.read_exact(&mut buf)?;
+    Ok(wincode::deserialize(&buf)?)
+}
 
 /// An error
 #[derive(Debug, Error)]
@@ -198,10 +214,10 @@ pub enum Error {
     LBAExceedsMaximumCylinders,
     /// Deserialization errors.
     #[error("deserialization failed")]
-    Deserialize(#[from] DecodeError),
+    Deserialize(#[from] ReadError),
     /// Serialization errors.
     #[error("Serialization failed")]
-    Serialize(#[from] EncodeError),
+    Serialize(#[from] WriteError),
     /// I/O errors.
     #[error("generic I/O error")]
     Io(#[from] std::io::Error),
@@ -573,11 +589,6 @@ impl MBR {
                 }
             }
 
-            // newtype for bootstrap code so we can serialize it via BigArray
-            // pending https://github.com/serde-rs/serde/issues/1937
-            #[derive(Serialize)]
-            struct BootstrapCode446(#[serde(with = "BigArray")] [u8; 446]);
-
             let next_logical_partitions = self
                 .logical_partitions
                 .iter()
@@ -593,8 +604,8 @@ impl MBR {
                 writer.seek(SeekFrom::Start(u64::from(
                     l.absolute_ebr_lba * self.sector_size,
                 )))?;
-                encode_into_std_write(BootstrapCode446(l.bootstrap_code), &mut writer, legacy())?;
-                encode_into_std_write(&partition, &mut writer, legacy())?;
+                writer.write_all(&l.bootstrap_code)?;
+                encode_into_std_write(&partition, &mut writer)?;
                 if let Some(next) = next {
                     encode_into_std_write(
                         &MBRPartitionEntry {
@@ -608,13 +619,12 @@ impl MBR {
                             sectors: next.ebr_sectors.unwrap(),
                         },
                         &mut writer,
-                        legacy(),
                     )?;
                 } else {
-                    encode_into_std_write(MBRPartitionEntry::empty(), &mut writer, legacy())?;
+                    encode_into_std_write(&MBRPartitionEntry::empty(), &mut writer)?;
                 }
                 writer.write_all(&[0; 16 * 2])?;
-                encode_into_std_write(BOOT_SIGNATURE, &mut writer, legacy())?;
+                writer.write_all(&BOOT_SIGNATURE)?;
             }
         }
 
@@ -1035,10 +1045,9 @@ impl IndexMut<usize> for MBR {
 }
 
 /// An MBR partition table header
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, SchemaRead, SchemaWrite, PartialEq, Eq)]
 pub struct MBRHeader {
     /// Bootstrap code area
-    #[serde(with = "BigArray")]
     pub bootstrap_code: [u8; 440],
     /// 32-bit disk signature
     pub disk_signature: [u8; 4],
@@ -1134,12 +1143,12 @@ impl MBRHeader {
 
     /// Attempt to read a MBR header from a reader.  This operation will seek at the
     /// correct location before trying to write to disk.
-    pub fn read_from<R>(mut reader: &mut R) -> Result<MBRHeader>
+    pub fn read_from<R>(reader: &mut R) -> Result<MBRHeader>
     where
         R: Read + Seek + ?Sized,
     {
         reader.seek(SeekFrom::Start(0))?;
-        let header: Self = decode_from_std_read(&mut reader, legacy())?;
+        let header: Self = decode_boot_record(reader)?;
         header.check()?;
         Ok(header)
     }
@@ -1166,7 +1175,7 @@ impl MBRHeader {
     {
         self.check()?;
         writer.seek(SeekFrom::Start(0))?;
-        encode_into_std_write(self, &mut writer, legacy())?;
+        encode_into_std_write(self, &mut writer)?;
 
         Ok(())
     }
@@ -1196,9 +1205,8 @@ impl IndexMut<usize> for MBRHeader {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, SchemaRead)]
 struct EBRHeader {
-    #[serde(with = "BigArray")]
     bootstrap_code: [u8; 446],
     partition_1: MBRPartitionEntry,
     partition_2: MBRPartitionEntry,
@@ -1212,7 +1220,7 @@ impl EBRHeader {
     where
         R: Read,
     {
-        let header: Self = decode_from_std_read(reader, legacy())?;
+        let header: Self = decode_boot_record(reader)?;
         header.check()?;
         Ok(header)
     }
@@ -1232,7 +1240,7 @@ impl EBRHeader {
 }
 
 /// An MBR partition entry
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, SchemaRead, SchemaWrite, PartialEq, Eq)]
 pub struct MBRPartitionEntry {
     /// Boot flag
     pub boot: u8,
@@ -1501,66 +1509,52 @@ impl CHS {
     }
 }
 
-struct CHSVisitor;
-
-impl<'de> Visitor<'de> for CHSVisitor {
-    type Value = CHS;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-        formatter.write_str("CHS addressing")
-    }
-
-    fn visit_seq<A>(self, mut seq: A) -> std::result::Result<CHS, A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        let head = BitVec::<u8, Msb0>::from_vec(vec![seq.next_element::<u8>()?.unwrap()]);
-        let mut bv = BitVec::<u8, Msb0>::from_vec(vec![seq.next_element::<u8>()?.unwrap()]);
-        let mut cylinder = BitVec::<u16, Msb0>::with_capacity(10);
-        cylinder.extend(repeat(false).take(6));
-        cylinder.extend(bv.drain(..2));
-        cylinder.extend(BitVec::<u8, Msb0>::from_vec(vec![seq
-            .next_element::<u8>()?
-            .unwrap()]));
-        let mut sector = BitVec::<u8, Msb0>::with_capacity(8);
-        sector.push(false);
-        sector.push(false);
-        sector.extend(bv.drain(..));
-
-        Ok(CHS {
-            cylinder: cylinder.as_raw_slice()[0],
-            head: head.as_raw_slice()[0],
-            sector: sector.as_raw_slice()[0],
-        })
-    }
-}
-
-impl<'de> Deserialize<'de> for CHS {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_tuple(3, CHSVisitor)
-    }
-}
-
-impl Serialize for CHS {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut bv = BitVec::<u8, Msb0>::from_vec(vec![self.head]);
-        let mut sector = BitVec::<u8, Msb0>::from_vec(vec![self.sector]);
-        let mut cylinder = BitVec::<u16, Msb0>::from_vec(vec![self.cylinder]);
-        bv.extend(cylinder.drain(..8).skip(6));
-        bv.extend(sector.drain(2..));
-        bv.extend(cylinder.drain(..));
-
-        let mut seq = serializer.serialize_tuple(3)?;
-        for x in bv.as_raw_slice() {
-            seq.serialize_element(&x)?;
+// On disk, a CHS address is packed in 3 bytes:
+// - byte 0: head
+// - byte 1: bits 7-6 are bits 9-8 of the cylinder, bits 5-0 are the sector
+// - byte 2: bits 7-0 of the cylinder
+impl CHS {
+    fn from_bytes([head, sector_cylinder_high, cylinder_low]: [u8; 3]) -> CHS {
+        CHS {
+            cylinder: (u16::from(sector_cylinder_high >> 6) << 8) | u16::from(cylinder_low),
+            head,
+            sector: sector_cylinder_high & 0x3f,
         }
-        seq.end()
+    }
+
+    fn to_bytes(self) -> [u8; 3] {
+        let [cylinder_high, cylinder_low] = self.cylinder.to_be_bytes();
+        [
+            self.head,
+            ((cylinder_high & 0x03) << 6) | (self.sector & 0x3f),
+            cylinder_low,
+        ]
+    }
+}
+
+impl<'de> SchemaRead<'de> for CHS {
+    type Dst = CHS;
+
+    fn read(
+        reader: &mut impl wincode::io::Reader<'de>,
+        dst: &mut MaybeUninit<Self::Dst>,
+    ) -> wincode::ReadResult<()> {
+        let bytes = *reader.fill_array::<3>()?;
+        reader.consume(3)?;
+        dst.write(CHS::from_bytes(bytes));
+        Ok(())
+    }
+}
+
+impl SchemaWrite for CHS {
+    type Src = CHS;
+
+    fn size_of(_: &Self::Src) -> wincode::WriteResult<usize> {
+        Ok(3)
+    }
+
+    fn write(writer: &mut impl wincode::io::Writer, src: &Self::Src) -> wincode::WriteResult<()> {
+        Ok(writer.write(&src.to_bytes())?)
     }
 }
 
@@ -1568,7 +1562,6 @@ impl Serialize for CHS {
 #[allow(clippy::cognitive_complexity)]
 mod tests {
     use super::*;
-    use bincode::serde::{decode_from_slice, encode_into_slice};
     use std::fs::File;
     use std::io::Cursor;
 
@@ -1577,7 +1570,7 @@ mod tests {
 
     #[test]
     fn deserialize_maximum_chs_value() {
-        let chs: CHS = decode_from_slice(&[0xff, 0xff, 0xff], legacy()).unwrap().0;
+        let chs: CHS = wincode::deserialize(&[0xff, 0xff, 0xff]).unwrap();
         assert_eq!(
             chs,
             CHS {
@@ -1595,8 +1588,8 @@ mod tests {
             head: 255,
             sector: 63,
         };
-        let mut slice = [0; 3];
-        encode_into_slice(chs, &mut slice, legacy()).unwrap();
+        let slice = wincode::serialize(&chs).unwrap();
+        assert_eq!(slice.len(), 3);
         for element in slice {
             assert_eq!(element, 0xff);
         }
@@ -1604,7 +1597,7 @@ mod tests {
 
     #[test]
     fn serialize_and_deserialize_some_chs_value() {
-        let chs: CHS = decode_from_slice(&[0xaa, 0xaa, 0xaa], legacy()).unwrap().0;
+        let chs: CHS = wincode::deserialize(&[0xaa, 0xaa, 0xaa]).unwrap();
         assert_eq!(
             chs,
             CHS {
@@ -1613,8 +1606,8 @@ mod tests {
                 sector: 42,
             }
         );
-        let mut slice = [0; 3];
-        encode_into_slice(chs, &mut slice, legacy()).unwrap();
+        let slice = wincode::serialize(&chs).unwrap();
+        assert_eq!(slice.len(), 3);
         for element in slice {
             assert_eq!(element, 0xaa);
         }
