@@ -2076,6 +2076,108 @@ mod tests {
         mbr.update_from(&mut cur).unwrap();
         assert_eq!(mbr.disk_size, 20);
     }
+
+    /// Build a 512-byte MBR sector with every byte of partition 1's first
+    /// CHS address controlled by the caller and arbitrary data elsewhere.
+    fn mbr_sector_with_chs(chs: [u8; 3]) -> Vec<u8> {
+        let mut sector: Vec<u8> = (0..512).map(|i| (i * 7 + 3) as u8).collect();
+        for entry in 0..4 {
+            let off = 446 + entry * 16;
+            sector[off] = if entry == 0 {
+                BOOT_ACTIVE
+            } else {
+                BOOT_INACTIVE
+            };
+        }
+        sector[447..450].copy_from_slice(&chs);
+        sector[510] = 0x55;
+        sector[511] = 0xaa;
+        sector
+    }
+
+    #[test]
+    fn header_round_trip_is_byte_identical_for_all_chs_encodings() {
+        for b1 in 0..=255_u8 {
+            for b2 in 0..=255_u8 {
+                let b0 = b1 ^ b2.rotate_left(3);
+                let sector = mbr_sector_with_chs([b0, b1, b2]);
+
+                let header = MBRHeader::read_from(&mut Cursor::new(sector.clone())).unwrap();
+                assert_eq!(
+                    header.partition_1.first_chs,
+                    CHS {
+                        cylinder: (u16::from(b1 >> 6) << 8) | u16::from(b2),
+                        head: b0,
+                        sector: b1 & 0x3f,
+                    }
+                );
+
+                let mut out = Cursor::new(vec![0; 512]);
+                header.write_into(&mut out).unwrap();
+                assert_eq!(
+                    out.into_inner(),
+                    sector,
+                    "chs bytes {b0:#04x} {b1:#04x} {b2:#04x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn read_then_write_fixtures_is_byte_identical() {
+        for path in [DISK1, DISK2] {
+            let original = std::fs::read(path).unwrap();
+            let ss = 512;
+
+            let mbr = MBR::read_from(&mut Cursor::new(original.clone()), ss).unwrap();
+            let mut out = Cursor::new(vec![0; original.len()]);
+            let mut mbr = mbr;
+            mbr.write_into(&mut out).unwrap();
+            let out = out.into_inner();
+
+            let mut sectors = vec![0_usize];
+            sectors.extend(
+                mbr.logical_partitions
+                    .iter()
+                    .map(|l| l.absolute_ebr_lba as usize),
+            );
+            for lba in sectors {
+                let range = lba * ss as usize..(lba + 1) * ss as usize;
+                assert_eq!(
+                    out[range.clone()],
+                    original[range],
+                    "{path}: sector {lba} differs"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn write_new_mbr_with_logical_partitions_is_stable() {
+        let ss = 512_u32;
+        let mut cur = Cursor::new(vec![0; 64 * ss as usize]);
+        let mut mbr = MBR::new_from(&mut cur, ss, [0x12, 0x34, 0x56, 0x78]).unwrap();
+        mbr.align = 1;
+        mbr.header.partition_1 = MBRPartitionEntry {
+            boot: BOOT_ACTIVE,
+            first_chs: CHS::empty(),
+            sys: 0x0f,
+            last_chs: CHS::empty(),
+            starting_lba: 4,
+            sectors: 60,
+        };
+        for (n, sys) in [(4, 0x83), (8, 0x07), (12, 0x0c)] {
+            mbr.push(sys, n, 6).unwrap();
+        }
+        mbr.write_into(&mut cur).unwrap();
+        let first = cur.get_ref().clone();
+
+        let mut mbr = MBR::read_from(&mut Cursor::new(first.clone()), ss).unwrap();
+        assert_eq!(mbr.logical_partitions.len(), 3);
+        let mut cur = Cursor::new(vec![0; 64 * ss as usize]);
+        mbr.write_into(&mut cur).unwrap();
+        assert_eq!(cur.into_inner(), first);
+    }
 }
 
 #[cfg(doctest)]
