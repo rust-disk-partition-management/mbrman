@@ -580,9 +580,9 @@ impl MBR {
                     ..l.partition
                 };
                 partition.check()?;
-                writer.seek(SeekFrom::Start(u64::from(
-                    l.absolute_ebr_lba * self.sector_size,
-                )))?;
+                writer.seek(SeekFrom::Start(
+                    u64::from(l.absolute_ebr_lba) * u64::from(self.sector_size),
+                ))?;
                 let next_ebr = match next {
                     Some(next) => MBRPartitionEntry {
                         boot: BOOT_INACTIVE,
@@ -2243,6 +2243,105 @@ mod tests {
             MBRHeader::from_bytes(&bytes),
             Err(Error::InvalidSignature)
         ));
+    }
+
+    /// A disk of any size that only stores the sectors actually written. Sectors never
+    /// written read as zeros. Each read or write stays within one sector; `read_exact` and
+    /// `write_all` loop over the rest.
+    struct SparseDisk {
+        len: u64,
+        pos: u64,
+        sectors: std::collections::HashMap<u64, [u8; 512]>,
+    }
+
+    impl SparseDisk {
+        fn new(len: u64) -> SparseDisk {
+            SparseDisk {
+                len,
+                pos: 0,
+                sectors: Default::default(),
+            }
+        }
+
+        /// The sector at `self.pos`, the offset in it and how many bytes of it fit in `n`.
+        fn span(&self, n: usize) -> (u64, usize, usize) {
+            let offset = (self.pos % 512) as usize;
+            let remaining =
+                usize::try_from(self.len.saturating_sub(self.pos)).unwrap_or(usize::MAX);
+            (self.pos / 512, offset, n.min(512 - offset).min(remaining))
+        }
+    }
+
+    impl Read for SparseDisk {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let (lba, offset, n) = self.span(buf.len());
+            match self.sectors.get(&lba) {
+                Some(sector) => buf[..n].copy_from_slice(&sector[offset..offset + n]),
+                None => buf[..n].fill(0),
+            }
+            self.pos += n as u64;
+            Ok(n)
+        }
+    }
+
+    impl Write for SparseDisk {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let (lba, offset, n) = self.span(buf.len());
+            let sector = self.sectors.entry(lba).or_insert([0; 512]);
+            sector[offset..offset + n].copy_from_slice(&buf[..n]);
+            self.pos += n as u64;
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Seek for SparseDisk {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            let new = match pos {
+                SeekFrom::Start(n) => Some(n),
+                SeekFrom::End(n) => self.len.checked_add_signed(n),
+                SeekFrom::Current(n) => self.pos.checked_add_signed(n),
+            };
+            self.pos = new.ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+            Ok(self.pos)
+        }
+    }
+
+    #[test]
+    fn logical_partitions_past_4_gib() {
+        let ss = 512_u32;
+        let mut disk = SparseDisk::new(16_u64 << 30);
+        let mut mbr = MBR::new_from(&mut disk, ss, [0xff; 4]).unwrap();
+        // the extended partition starts at 8 GiB, so every EBR offset exceeds u32::MAX
+        let start = u32::try_from((8_u64 << 30) / u64::from(ss)).unwrap();
+        mbr.header.partition_1 = MBRPartitionEntry {
+            boot: BOOT_INACTIVE,
+            first_chs: CHS::empty(),
+            sys: 0x0f,
+            last_chs: CHS::empty(),
+            starting_lba: start,
+            sectors: 1 << 20,
+        };
+        mbr.push(0x83, start + 2048, 4096).unwrap();
+        mbr.push(0x83, start + 8192, 4096).unwrap();
+        mbr.write_into(&mut disk).unwrap();
+
+        for l in &mbr.logical_partitions {
+            assert!(
+                disk.sectors.contains_key(&u64::from(l.absolute_ebr_lba)),
+                "no EBR written at LBA {}",
+                l.absolute_ebr_lba
+            );
+        }
+        let read = MBR::read_from(&mut disk, ss).unwrap();
+        assert_eq!(read.logical_partitions.len(), 2);
+        for (r, w) in read.logical_partitions.iter().zip(&mbr.logical_partitions) {
+            assert_eq!(r.absolute_ebr_lba, w.absolute_ebr_lba);
+            assert_eq!(r.partition, w.partition);
+        }
     }
 
     #[test]
