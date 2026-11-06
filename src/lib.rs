@@ -1312,9 +1312,9 @@ impl MBRPartitionEntry {
     pub fn from_bytes(bytes: &[u8; 16]) -> MBRPartitionEntry {
         MBRPartitionEntry {
             boot: bytes[0],
-            first_chs: CHS::from_bytes(chunk(bytes, 1)),
+            first_chs: CHS::from_bytes(&chunk(bytes, 1)),
             sys: bytes[4],
-            last_chs: CHS::from_bytes(chunk(bytes, 5)),
+            last_chs: CHS::from_bytes(&chunk(bytes, 5)),
             starting_lba: u32::from_le_bytes(chunk(bytes, 8)),
             sectors: u32::from_le_bytes(chunk(bytes, 12)),
         }
@@ -1590,7 +1590,7 @@ impl CHS {
 // - byte 2: bits 7-0 of the cylinder
 impl CHS {
     /// Decode a CHS address from its 3 packed on-disk bytes.
-    pub fn from_bytes([head, sector_cylinder_high, cylinder_low]: [u8; 3]) -> CHS {
+    pub fn from_bytes(&[head, sector_cylinder_high, cylinder_low]: &[u8; 3]) -> CHS {
         CHS {
             cylinder: (u16::from(sector_cylinder_high >> 6) << 8) | u16::from(cylinder_low),
             head,
@@ -1599,7 +1599,7 @@ impl CHS {
     }
 
     /// Encode a CHS address as its 3 packed on-disk bytes.
-    pub fn to_bytes(self) -> [u8; 3] {
+    pub fn to_bytes(&self) -> [u8; 3] {
         let [cylinder_high, cylinder_low] = self.cylinder.to_be_bytes();
         [
             self.head,
@@ -1621,7 +1621,7 @@ mod tests {
 
     #[test]
     fn deserialize_maximum_chs_value() {
-        let chs: CHS = CHS::from_bytes([0xff, 0xff, 0xff]);
+        let chs: CHS = CHS::from_bytes(&[0xff, 0xff, 0xff]);
         assert_eq!(
             chs,
             CHS {
@@ -1648,7 +1648,7 @@ mod tests {
 
     #[test]
     fn serialize_and_deserialize_some_chs_value() {
-        let chs: CHS = CHS::from_bytes([0xaa, 0xaa, 0xaa]);
+        let chs: CHS = CHS::from_bytes(&[0xaa, 0xaa, 0xaa]);
         assert_eq!(
             chs,
             CHS {
