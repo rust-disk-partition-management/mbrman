@@ -22,6 +22,7 @@ Fixed:
 
 - `MBR::write_into` wrote EBRs located more than 4 GiB into the disk at the wrong offset (#40)
 - `MBR::read_from` panicked (debug) or returned a wrong LBA (release) on EBR entries whose LBA overflows; it now returns `Error::InconsistentEBR` (#40)
+- `MBR::read_from` panicked when every used partition starts at LBA 0; the alignment then falls back to the default
 
 ## v0.6.1 (2025-07-07)
 

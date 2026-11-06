@@ -515,6 +515,8 @@ impl MBR {
             .chain(logical_partitions.iter().map(|x| &x.partition))
             .filter(|x| x.is_used())
             .map(|x| x.starting_lba)
+            // every alignment divides 0, so LBA 0 (only in a corrupt table) constrains nothing
+            .filter(|&lba| lba != 0)
             .collect::<Vec<_>>();
 
         if lbas.is_empty() {
@@ -1979,6 +1981,19 @@ mod tests {
         assert_eq!(mbr.header.partition_2.sys, 0x0b);
         assert_eq!(mbr.header.partition_2.starting_lba, 3);
         assert_eq!(mbr.header.partition_2.sectors, 1);
+    }
+
+    #[test]
+    fn read_used_partition_at_lba_0() {
+        let ss = 512_u32;
+        let mut data = vec![0; 10 * ss as usize];
+        // partition 1 is used (sys 0x83) and starts at LBA 0, over the MBR itself
+        data[446 + 4] = 0x83;
+        data[446 + 12..446 + 16].copy_from_slice(&5_u32.to_le_bytes());
+        data[510..512].copy_from_slice(&BOOT_SIGNATURE);
+
+        let mbr = MBR::read_from(&mut Cursor::new(data), ss).unwrap();
+        assert_eq!(mbr.align, DEFAULT_ALIGN);
     }
 
     #[test]
