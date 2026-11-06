@@ -437,10 +437,17 @@ impl MBR {
                     Err(Error::InvalidSignature) if relative_ebr_lba == 0 => break,
                     Err(err) => return Err(err),
                 };
-                let absolute_ebr_lba = extended.starting_lba + relative_ebr_lba;
+                let absolute_ebr_lba = extended
+                    .starting_lba
+                    .checked_add(relative_ebr_lba)
+                    .ok_or(Error::InconsistentEBR)?;
+                let starting_lba = partition
+                    .starting_lba
+                    .checked_add(absolute_ebr_lba)
+                    .ok_or(Error::InconsistentEBR)?;
                 logical_partitions.push(LogicalPartition {
                     partition: MBRPartitionEntry {
-                        starting_lba: partition.starting_lba + absolute_ebr_lba,
+                        starting_lba,
                         ..partition
                     },
                     absolute_ebr_lba,
@@ -2242,6 +2249,31 @@ mod tests {
         assert!(matches!(
             MBRHeader::from_bytes(&bytes),
             Err(Error::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn read_ebr_entry_with_overflowing_lba() {
+        let ss = 512_u32;
+        let data = vec![0; 10 * ss as usize];
+        let mut cur = Cursor::new(data);
+        let mut mbr = MBR::new_from(&mut cur, ss, [0xff; 4]).unwrap();
+        mbr.header.partition_1.sys = 0x0f;
+        mbr.header.partition_1.starting_lba = 1;
+        mbr.header.partition_1.sectors = 9;
+        mbr.write_into(&mut cur).unwrap();
+
+        // valid EBR whose first entry starts at u32::MAX sectors after the EBR
+        let ebr = cur.get_mut();
+        let entry = ss as usize + 446;
+        ebr[entry + 4] = 0x83;
+        ebr[entry + 8..entry + 12].copy_from_slice(&u32::MAX.to_le_bytes());
+        ebr[entry + 12..entry + 16].copy_from_slice(&1_u32.to_le_bytes());
+        ebr[ss as usize + 510..ss as usize + 512].copy_from_slice(&BOOT_SIGNATURE);
+
+        assert!(matches!(
+            MBR::read_from(&mut cur, ss),
+            Err(Error::InconsistentEBR)
         ));
     }
 
