@@ -1,32 +1,27 @@
 ![Rust](https://github.com/rust-disk-partition-management/mbrman/workflows/Rust/badge.svg)
 [![Latest Version](https://img.shields.io/crates/v/mbrman.svg)](https://crates.io/crates/mbrman)
-![Rust 1.56+](https://img.shields.io/badge/rust-1.56%2B-orange.svg)
+![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)
 ![License](https://img.shields.io/crates/l/mbrman)
 [![Docs.rs](https://docs.rs/mbrman/badge.svg)](https://docs.rs/mbrman)
-[![LOC](https://tokei.rs/b1/github/rust-disk-partition-management/mbrman)](https://github.com/rust-disk-partition-management/mbrman)
+[![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-blue)](CHANGELOG.md)
 [![Dependency Status](https://deps.rs/repo/github/rust-disk-partition-management/mbrman/status.svg)](https://deps.rs/repo/github/rust-disk-partition-management/mbrman)
 
-mbrman
-======
+# mbrman
 
-MBR Partition Management in Rust
-
-Library Usage
--------------
-
-A library that allows managing MBR partition tables.
+A library for reading and managing MBR partition tables.
 
 ## Features
 
- *  Create primary partitions and logical volumes
- *  Delete primary partitions and logical volumes
- *  Automatically generate logical volume's EBR (or can be provided manually)
- *  If the disk geometry is set, the partition CHS addresses will be calculated
-    automatically when writing to disk
+- Create and delete primary partitions and logical volumes
+- Generate the EBR of a logical volume automatically, or provide it manually
+- Compute the CHS addresses of logical partitions automatically when writing
+  to disk, if the disk geometry is set
 
 ## Examples
 
-### Read all the partitions of a disk
+### Read the partitions of a disk
+
+Open a disk image, read its MBR and list the partitions in use.
 
 ```rust
 let mut f = std::fs::File::open("tests/fixtures/disk1.img")
@@ -48,7 +43,9 @@ for (i, p) in mbr.iter() {
 }
 ```
 
-### Create and delete primary partitions
+### Create and delete a primary partition
+
+Find a free slot and free space, fill the slot with a new partition, then empty it again.
 
 ```rust
 let mut f = std::fs::File::open("tests/fixtures/disk1.img")
@@ -74,10 +71,12 @@ mbr[free_partition_number] = mbrman::MBRPartitionEntry {
 
 mbr[free_partition_number] = mbrman::MBRPartitionEntry::empty();
 
-// NOTE: no modification is committed to the disk until we call mbr.write_into()
+// NOTE: nothing is written to the disk until you call mbr.write_into()
 ```
 
-### Create a new partition table from an empty disk
+### Create a new partition table on an empty disk
+
+Write a fresh MBR to a blank in-memory disk.
 
 ```rust
 let ss = 512; // sector size
@@ -87,11 +86,13 @@ let mut cur = std::io::Cursor::new(data);
 let mut mbr = mbrman::MBR::new_from(&mut cur, ss as u32, [0xff; 4])
     .expect("could not create partition table");
 
-// NOTE: commit the change to the in-memory buffer
+// NOTE: write the changes to the in-memory buffer
 mbr.write_into(&mut cur);
 ```
 
-### Add a new logical volume to the disk
+### Add a logical volume
+
+A logical volume lives inside an extended partition, so create one first. `push` then places the volume and its EBR for you.
 
 ```rust
 let ss = 512; // sector size
@@ -110,18 +111,22 @@ mbr[1] = mbrman::MBRPartitionEntry {
     sectors: mbr.disk_size - 1,         // the number of sectors in that partition
 };
 
-// this helper function will do all the hard work for you
-// here it creates a logical volume with Linux filesystem that occupies the entire disk
-// NOTE: you will lose 1 sector because it is used by the EBR
-mbr.push(0x83, 1, mbr.disk_size - 1);
+// align on sectors, so the EBR only takes the first sector of the extended partition
+mbr.align = 1;
 
-// NOTE: commit the change to the in-memory buffer
+// this helper does the hard work for you: here it creates a Linux filesystem
+// logical volume that fills the entire extended partition
+// NOTE: 1 sector is lost because the EBR uses it
+mbr.push(0x83, 1, mbr.disk_size - 1)
+    .expect("could not add the logical volume");
+
+// NOTE: write the changes to the in-memory buffer
 mbr.write_into(&mut cur);
 ```
 
-### Add a new logical volume manually to the disk
+### Add a logical volume manually
 
-This is useful only if you need to specify exactly where goes the EBR and the partition itself.
+Use this only if you need to choose exactly where the EBR and the partition go.
 
 ```rust
 let ss = 512; // sector size
@@ -140,7 +145,7 @@ mbr[1] = mbrman::MBRPartitionEntry {
     sectors: mbr.disk_size - 1,         // the number of sectors in that partition
 };
 
-// NOTE: mbrman won't check the consistency of the partition you have created manually
+// NOTE: mbrman does not check that a manually created partition is consistent
 mbr.logical_partitions.push(
     mbrman::LogicalPartition {
         // this is the actual partition entry for the logical volume
@@ -161,11 +166,11 @@ mbr.logical_partitions.push(
         // this is the absolute CHS address of the EBR (only used by old computers)
         ebr_first_chs: mbrman::CHS::empty(),                // only for old computers
         // this is the absolute CHS address of the last EBR (only used by old computers)
-        // NOTE: this is not know the first EBR
+        // NOTE: this is never known for the first EBR
         ebr_last_chs: None,
     }
 );
 
-// NOTE: commit the change to the in-memory buffer
+// NOTE: write the changes to the in-memory buffer
 mbr.write_into(&mut cur);
 ```

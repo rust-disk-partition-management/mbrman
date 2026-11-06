@@ -5,20 +5,16 @@ authors = ["Cecile Tonglet <cecile.tonglet@cecton.com>"]
 edition = "2021"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
-description = "MBR Partition Management in Rust"
+description = "A library for reading and managing MBR partition tables"
 repository = "https://github.com/rust-disk-partition-management/mbrman"
 homepage = "https://github.com/rust-disk-partition-management/mbrman"
 documentation = "https://docs.rs/mbrman"
 readme = "README.md"
 keywords = ["mbr", "partition", "table", "filesystem", "disk"]
 categories = ["filesystem"]
-include = ["src/**/*.rs", "tests/fixtures/*.img", "README.md", "LICENSE.Apache-2.0", "LICENSE.MIT"]
+include = ["src/**/*.rs", "tests/fixtures/*.img", "README.md", "CHANGELOG.md", "LICENSE.Apache-2.0", "LICENSE.MIT"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bitvec = "1.0.1"
-bincode = { version = "2.0.1", features = ["serde"] }
-serde = { version = "1.0.210", features = ["derive"] }
-serde-big-array = "0.5.1"
 thiserror = "2.0.12"
