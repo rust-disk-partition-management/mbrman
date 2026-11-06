@@ -158,11 +158,8 @@
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::iter::once;
-use std::mem::MaybeUninit;
 use std::ops::{Index, IndexMut};
 use thiserror::Error;
-use wincode::config::ConfigCore;
-use wincode::{ReadError, SchemaRead, SchemaWrite, WriteError};
 
 const DEFAULT_ALIGN: u32 = 2048;
 const MAX_ALIGN: u32 = 16384;
@@ -179,24 +176,16 @@ pub const BOOT_INACTIVE: u8 = 0x00;
 /// The result of reading, writing or managing a MBR.
 pub type Result<T> = std::result::Result<T, Error>;
 
-fn encode_into_std_write<T, W>(src: &T, writer: &mut W) -> Result<()>
-where
-    T: wincode::Serialize<Src = T>,
-    W: Write + ?Sized,
-{
-    let buf = wincode::serialize(src)?;
-    Ok(writer.write_all(&buf)?)
-}
-
-/// Read exactly one boot record (MBR or EBR sector) and decode it.
-fn decode_boot_record<T, R>(reader: &mut R) -> Result<T>
-where
-    T: for<'de> wincode::Deserialize<'de, Dst = T>,
-    R: Read + ?Sized,
-{
+/// Read exactly one boot record (MBR or EBR sector).
+fn read_boot_record<R: Read + ?Sized>(reader: &mut R) -> Result<[u8; BOOT_RECORD_SIZE]> {
     let mut buf = [0; BOOT_RECORD_SIZE];
     reader.read_exact(&mut buf)?;
-    Ok(wincode::deserialize(&buf)?)
+    Ok(buf)
+}
+
+/// Copy `N` bytes starting at `offset` into an array.
+fn chunk<const N: usize>(bytes: &[u8], offset: usize) -> [u8; N] {
+    bytes[offset..offset + N].try_into().unwrap()
 }
 
 /// An error
@@ -213,12 +202,6 @@ pub enum Error {
     /// The CHS address requested exceeds the number of cylinders in the disk
     #[error("exceeded the maximum number of cylinders on disk")]
     LBAExceedsMaximumCylinders,
-    /// Deserialization errors.
-    #[error("deserialization failed")]
-    Deserialize(#[from] ReadError),
-    /// Serialization errors.
-    #[error("serialization failed")]
-    Serialize(#[from] WriteError),
     /// I/O errors.
     #[error("generic I/O error")]
     Io(#[from] std::io::Error),
@@ -619,7 +602,7 @@ impl MBR {
                     _unused_partition_4: [0; 16],
                     boot_signature: BOOT_SIGNATURE,
                 };
-                encode_into_std_write(&ebr, &mut writer)?;
+                writer.write_all(&ebr.to_bytes())?;
             }
         }
 
@@ -1040,7 +1023,7 @@ impl IndexMut<usize> for MBR {
 }
 
 /// An MBR partition table header
-#[derive(Debug, Clone, SchemaRead, SchemaWrite, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MBRHeader {
     /// Bootstrap code area
     pub bootstrap_code: [u8; 440],
@@ -1143,9 +1126,43 @@ impl MBRHeader {
         R: Read + Seek + ?Sized,
     {
         reader.seek(SeekFrom::Start(0))?;
-        let header: Self = decode_boot_record(reader)?;
+        MBRHeader::from_bytes(&read_boot_record(reader)?)
+    }
+
+    /// Decode and validate a MBR header from the 512 bytes of the first sector.
+    pub fn from_bytes(bytes: &[u8; 512]) -> Result<MBRHeader> {
+        let header = MBRHeader {
+            bootstrap_code: chunk(bytes, 0),
+            disk_signature: chunk(bytes, 440),
+            copy_protected: chunk(bytes, 444),
+            partition_1: MBRPartitionEntry::from_bytes(&chunk(bytes, 446)),
+            partition_2: MBRPartitionEntry::from_bytes(&chunk(bytes, 462)),
+            partition_3: MBRPartitionEntry::from_bytes(&chunk(bytes, 478)),
+            partition_4: MBRPartitionEntry::from_bytes(&chunk(bytes, 494)),
+            boot_signature: chunk(bytes, 510),
+        };
         header.check()?;
         Ok(header)
+    }
+
+    /// Validate the MBR header and encode it as the 512 bytes of the first sector.
+    pub fn to_bytes(&self) -> Result<[u8; 512]> {
+        self.check()?;
+        let mut bytes = [0; BOOT_RECORD_SIZE];
+        bytes[..440].copy_from_slice(&self.bootstrap_code);
+        bytes[440..444].copy_from_slice(&self.disk_signature);
+        bytes[444..446].copy_from_slice(&self.copy_protected);
+        let partitions = [
+            &self.partition_1,
+            &self.partition_2,
+            &self.partition_3,
+            &self.partition_4,
+        ];
+        for (i, p) in partitions.into_iter().enumerate() {
+            bytes[446 + 16 * i..462 + 16 * i].copy_from_slice(&p.to_bytes());
+        }
+        bytes[510..].copy_from_slice(&self.boot_signature);
+        Ok(bytes)
     }
 
     /// Make a new MBR header
@@ -1164,13 +1181,13 @@ impl MBRHeader {
 
     /// Write the MBR header into a writer. This operation will seek at the
     /// correct location before trying to write to disk.
-    pub fn write_into<W>(&self, mut writer: &mut W) -> Result<()>
+    pub fn write_into<W>(&self, writer: &mut W) -> Result<()>
     where
         W: Write + Seek + ?Sized,
     {
-        self.check()?;
+        let bytes = self.to_bytes()?;
         writer.seek(SeekFrom::Start(0))?;
-        encode_into_std_write(self, &mut writer)?;
+        writer.write_all(&bytes)?;
 
         Ok(())
     }
@@ -1200,7 +1217,7 @@ impl IndexMut<usize> for MBRHeader {
     }
 }
 
-#[derive(Debug, Clone, SchemaRead, SchemaWrite)]
+#[derive(Debug, Clone)]
 struct EBRHeader {
     bootstrap_code: [u8; 446],
     partition_1: MBRPartitionEntry,
@@ -1215,9 +1232,28 @@ impl EBRHeader {
     where
         R: Read,
     {
-        let header: Self = decode_boot_record(reader)?;
+        let bytes = read_boot_record(reader)?;
+        let header = EBRHeader {
+            bootstrap_code: chunk(&bytes, 0),
+            partition_1: MBRPartitionEntry::from_bytes(&chunk(&bytes, 446)),
+            partition_2: MBRPartitionEntry::from_bytes(&chunk(&bytes, 462)),
+            _unused_partition_3: chunk(&bytes, 478),
+            _unused_partition_4: chunk(&bytes, 494),
+            boot_signature: chunk(&bytes, 510),
+        };
         header.check()?;
         Ok(header)
+    }
+
+    fn to_bytes(&self) -> [u8; BOOT_RECORD_SIZE] {
+        let mut bytes = [0; BOOT_RECORD_SIZE];
+        bytes[..446].copy_from_slice(&self.bootstrap_code);
+        bytes[446..462].copy_from_slice(&self.partition_1.to_bytes());
+        bytes[462..478].copy_from_slice(&self.partition_2.to_bytes());
+        bytes[478..494].copy_from_slice(&self._unused_partition_3);
+        bytes[494..510].copy_from_slice(&self._unused_partition_4);
+        bytes[510..].copy_from_slice(&self.boot_signature);
+        bytes
     }
 
     /// Validate invariants
@@ -1235,7 +1271,7 @@ impl EBRHeader {
 }
 
 /// An MBR partition entry
-#[derive(Debug, Clone, SchemaRead, SchemaWrite, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MBRPartitionEntry {
     /// Boot flag
     pub boot: u8,
@@ -1252,6 +1288,30 @@ pub struct MBRPartitionEntry {
 }
 
 impl MBRPartitionEntry {
+    /// Decode a partition entry from its 16 on-disk bytes. No validation is done.
+    pub fn from_bytes(bytes: &[u8; 16]) -> MBRPartitionEntry {
+        MBRPartitionEntry {
+            boot: bytes[0],
+            first_chs: CHS::from_bytes(chunk(bytes, 1)),
+            sys: bytes[4],
+            last_chs: CHS::from_bytes(chunk(bytes, 5)),
+            starting_lba: u32::from_le_bytes(chunk(bytes, 8)),
+            sectors: u32::from_le_bytes(chunk(bytes, 12)),
+        }
+    }
+
+    /// Encode a partition entry as its 16 on-disk bytes. No validation is done.
+    pub fn to_bytes(&self) -> [u8; 16] {
+        let mut bytes = [0; 16];
+        bytes[0] = self.boot;
+        bytes[1..4].copy_from_slice(&self.first_chs.to_bytes());
+        bytes[4] = self.sys;
+        bytes[5..8].copy_from_slice(&self.last_chs.to_bytes());
+        bytes[8..12].copy_from_slice(&self.starting_lba.to_le_bytes());
+        bytes[12..].copy_from_slice(&self.sectors.to_le_bytes());
+        bytes
+    }
+
     /// Creates an empty partition entry
     ///
     /// # Examples
@@ -1509,7 +1569,8 @@ impl CHS {
 // - byte 1: bits 7-6 are bits 9-8 of the cylinder, bits 5-0 are the sector
 // - byte 2: bits 7-0 of the cylinder
 impl CHS {
-    fn from_bytes([head, sector_cylinder_high, cylinder_low]: [u8; 3]) -> CHS {
+    /// Decode a CHS address from its 3 packed on-disk bytes.
+    pub fn from_bytes([head, sector_cylinder_high, cylinder_low]: [u8; 3]) -> CHS {
         CHS {
             cylinder: (u16::from(sector_cylinder_high >> 6) << 8) | u16::from(cylinder_low),
             head,
@@ -1517,43 +1578,14 @@ impl CHS {
         }
     }
 
-    fn to_bytes(self) -> [u8; 3] {
+    /// Encode a CHS address as its 3 packed on-disk bytes.
+    pub fn to_bytes(self) -> [u8; 3] {
         let [cylinder_high, cylinder_low] = self.cylinder.to_be_bytes();
         [
             self.head,
             ((cylinder_high & 0x03) << 6) | (self.sector & 0x3f),
             cylinder_low,
         ]
-    }
-}
-
-// SAFETY: `TYPE_META` is left at its default `TypeMeta::Dynamic` (no static size or
-// zero-copy claim), and `read` initializes `dst` only when it returns `Ok`: it reads the
-// 3 bytes first and writes `dst` last, so `dst` is left untouched on error.
-unsafe impl<'de, C: ConfigCore> SchemaRead<'de, C> for CHS {
-    type Dst = CHS;
-
-    fn read(
-        mut reader: impl wincode::io::Reader<'de>,
-        dst: &mut MaybeUninit<Self::Dst>,
-    ) -> wincode::ReadResult<()> {
-        let bytes = reader.take_array::<3>()?;
-        dst.write(CHS::from_bytes(bytes));
-        Ok(())
-    }
-}
-
-// SAFETY: `TYPE_META` is left at its default `TypeMeta::Dynamic`, and `size_of` returns 3,
-// exactly the number of bytes `write` emits (one fixed 3-byte array).
-unsafe impl<C: ConfigCore> SchemaWrite<C> for CHS {
-    type Src = CHS;
-
-    fn size_of(_: &Self::Src) -> wincode::WriteResult<usize> {
-        Ok(3)
-    }
-
-    fn write(mut writer: impl wincode::io::Writer, src: &Self::Src) -> wincode::WriteResult<()> {
-        Ok(writer.write(&src.to_bytes())?)
     }
 }
 
@@ -1569,7 +1601,7 @@ mod tests {
 
     #[test]
     fn deserialize_maximum_chs_value() {
-        let chs: CHS = wincode::deserialize(&[0xff, 0xff, 0xff]).unwrap();
+        let chs: CHS = CHS::from_bytes([0xff, 0xff, 0xff]);
         assert_eq!(
             chs,
             CHS {
@@ -1587,7 +1619,7 @@ mod tests {
             head: 255,
             sector: 63,
         };
-        let slice = wincode::serialize(&chs).unwrap();
+        let slice = chs.to_bytes();
         assert_eq!(slice.len(), 3);
         for element in slice {
             assert_eq!(element, 0xff);
@@ -1596,7 +1628,7 @@ mod tests {
 
     #[test]
     fn serialize_and_deserialize_some_chs_value() {
-        let chs: CHS = wincode::deserialize(&[0xaa, 0xaa, 0xaa]).unwrap();
+        let chs: CHS = CHS::from_bytes([0xaa, 0xaa, 0xaa]);
         assert_eq!(
             chs,
             CHS {
@@ -1605,7 +1637,7 @@ mod tests {
                 sector: 42,
             }
         );
-        let slice = wincode::serialize(&chs).unwrap();
+        let slice = chs.to_bytes();
         assert_eq!(slice.len(), 3);
         for element in slice {
             assert_eq!(element, 0xaa);
@@ -2190,26 +2222,27 @@ mod tests {
     }
 
     #[test]
-    fn boot_record_encoded_sizes() {
-        let entry = MBRPartitionEntry::empty();
-        assert_eq!(wincode::serialized_size(&CHS::empty()).unwrap(), 3);
-        assert_eq!(wincode::serialized_size(&entry).unwrap(), 16);
-        assert_eq!(
-            wincode::serialized_size(&MBRHeader::new([0; 4])).unwrap(),
-            BOOT_RECORD_SIZE as u64
-        );
-        let ebr = EBRHeader {
-            bootstrap_code: [0; 446],
-            partition_1: entry.clone(),
-            partition_2: entry,
-            _unused_partition_3: [0; 16],
-            _unused_partition_4: [0; 16],
-            boot_signature: BOOT_SIGNATURE,
-        };
-        assert_eq!(
-            wincode::serialized_size(&ebr).unwrap(),
-            BOOT_RECORD_SIZE as u64
-        );
+    fn header_bytes_round_trip() {
+        for path in [DISK1, DISK2] {
+            let original = std::fs::read(path).unwrap();
+            let bytes: [u8; 512] = original[..512].try_into().unwrap();
+            let header = MBRHeader::from_bytes(&bytes).unwrap();
+            assert_eq!(header.to_bytes().unwrap(), bytes, "{path}");
+            assert_eq!(
+                MBRHeader::from_bytes(&header.to_bytes().unwrap()).unwrap(),
+                header
+            );
+        }
+    }
+
+    #[test]
+    fn header_from_bytes_rejects_invalid_signature() {
+        let mut bytes = MBRHeader::new([0xff; 4]).to_bytes().unwrap();
+        bytes[510] = 0xaa;
+        assert!(matches!(
+            MBRHeader::from_bytes(&bytes),
+            Err(Error::InvalidSignature)
+        ));
     }
 
     #[test]

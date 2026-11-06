@@ -3,7 +3,6 @@ name = "mbrman"
 version = "0.6.1"
 authors = ["Cecile Tonglet <cecile.tonglet@cecton.com>"]
 edition = "2021"
-resolver = "3"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 description = "MBR Partition Management in Rust"
@@ -19,4 +18,3 @@ include = ["src/**/*.rs", "tests/fixtures/*.img", "README.md", "LICENSE.Apache-2
 
 [dependencies]
 thiserror = "2.0.12"
-wincode = { version = "0.4", features = ["derive"] }
