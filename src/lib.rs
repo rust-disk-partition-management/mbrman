@@ -1129,7 +1129,7 @@ impl MBRHeader {
     }
 
     /// Attempt to read a MBR header from a reader.  This operation will seek at the
-    /// correct location before trying to write to disk.
+    /// correct location before trying to read from disk.
     pub fn read_from<R>(reader: &mut R) -> Result<MBRHeader>
     where
         R: Read + Seek + ?Sized,
