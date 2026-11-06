@@ -4,14 +4,21 @@
 
 Breaking changes:
 
-- Remove the `bincode`, `serde`, `serde-big-array` and `bitvec` dependencies; `thiserror` is the only dependency left (#40)
+- Remove the `bincode`, `serde`, `serde-big-array` and `bitvec` dependencies (#40)
 - `MBRHeader`, `MBRPartitionEntry` and `CHS` no longer implement serde's `Serialize`/`Deserialize`. Use the new `from_bytes`/`to_bytes` methods to encode them in memory (#40)
 - Remove `Error::Deserialize` and `Error::Serialize` (#40)
 - A truncated boot record now returns `Error::Io` with `UnexpectedEof` (#40)
 - `MBR::read_from` only treats the first EBR as missing when its signature is invalid; I/O errors and invalid entries there are now returned instead of being ignored (#40)
+- New default `std` feature: builds with `default-features = false` must enable it to keep the `std::io` integration
+
+Changed:
+
+- Remove the `thiserror` dependency: mbrman has no dependencies left. `Error` keeps the same variants and messages
 
 Added:
 
+- `no_std` support. The default `std` feature implements the new `io` traits for `std::io` types; without it, implement `io::DiskSize`, `io::DiskRead` and `io::DiskWrite` for your disk. The `MBR` type needs the `alloc` feature. Without `std`, `io::Error` only carries an `io::ErrorKind`
+- `MBRHeader::read_logical_partitions`, an iterator that reads the EBR chain one logical partition at a time, without allocating
 - `MBRHeader::from_bytes`/`to_bytes` to decode and encode a 512-byte MBR sector, with validation (#40)
 - `MBRPartitionEntry::from_bytes`/`to_bytes` and `CHS::from_bytes`/`to_bytes` to decode and encode raw entries and CHS addresses (#40)
 
@@ -19,6 +26,7 @@ Fixed:
 
 - `MBR::write_into` wrote EBRs located more than 4 GiB into the disk at the wrong offset (#40)
 - `MBR::read_from` panicked (debug) or returned a wrong LBA (release) on EBR entries whose LBA overflows; it now returns `Error::InconsistentEBR` (#40)
+- `MBR::read_from` panicked when every used partition starts at LBA 0; the alignment then falls back to the default
 
 ## v0.6.1 (2025-07-07)
 

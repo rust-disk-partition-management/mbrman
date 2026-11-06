@@ -17,6 +17,22 @@ A library for reading and managing MBR partition tables.
 - Compute the CHS addresses of logical partitions automatically when writing
   to disk, if the disk geometry is set
 
+## `no_std`
+
+mbrman works without `std`: disable the default features.
+
+- With the `alloc` feature, everything is available except the `std::io` integration.
+  Implement the traits of the `io` module (`DiskSize`, `DiskRead` and `DiskWrite`) for your
+  disk.
+- Without `alloc`, you can read a partition table: `MBRHeader::read_from` reads the MBR and
+  `MBRHeader::read_logical_partitions` reads the EBR chain one logical partition at a time.
+  The `MBR` type, to edit partition tables, needs `alloc`.
+
+```toml
+[dependencies]
+mbrman = { version = "0.7", default-features = false, features = ["alloc"] }
+```
+
 ## Examples
 
 ### Read the partitions of a disk
