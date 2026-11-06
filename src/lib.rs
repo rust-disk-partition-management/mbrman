@@ -427,9 +427,15 @@ impl MBR {
             let mut ebr_first_chs = extended.first_chs;
             let mut ebr_last_chs = None;
             loop {
-                let offset =
-                    (extended.starting_lba as u64 + relative_ebr_lba as u64) * sector_size as u64;
-                reader.seek(SeekFrom::Start(offset))?;
+                // check the link before following it: an EBR past u32::MAX cannot be
+                // represented, so it must not be read
+                let absolute_ebr_lba = extended
+                    .starting_lba
+                    .checked_add(relative_ebr_lba)
+                    .ok_or(Error::InconsistentEBR)?;
+                reader.seek(SeekFrom::Start(
+                    u64::from(absolute_ebr_lba) * u64::from(sector_size),
+                ))?;
                 let (partition, next, bootstrap_code) = match EBRHeader::read_from(&mut reader) {
                     Ok(ebr) => ebr.unwrap(),
                     // NOTE: if the extended partition is empty, it is not required that an
@@ -437,10 +443,6 @@ impl MBR {
                     Err(Error::InvalidSignature) if relative_ebr_lba == 0 => break,
                     Err(err) => return Err(err),
                 };
-                let absolute_ebr_lba = extended
-                    .starting_lba
-                    .checked_add(relative_ebr_lba)
-                    .ok_or(Error::InconsistentEBR)?;
                 let starting_lba = partition
                     .starting_lba
                     .checked_add(absolute_ebr_lba)
@@ -2340,6 +2342,40 @@ mod tests {
             self.pos = new.ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
             Ok(self.pos)
         }
+    }
+
+    #[test]
+    fn read_ebr_chain_with_overflowing_ebr_lba() {
+        let ss = 512_u32;
+        let mut disk = SparseDisk::new(4_u64 << 40);
+        let mut mbr = MBR::new_from(&mut disk, ss, [0xff; 4]).unwrap();
+        // the extended partition ends at u32::MAX, so a link 20 sectors in overflows
+        let start = u32::MAX - 9;
+        mbr.header.partition_1 = MBRPartitionEntry {
+            boot: BOOT_INACTIVE,
+            first_chs: CHS::empty(),
+            sys: 0x0f,
+            last_chs: CHS::empty(),
+            starting_lba: start,
+            sectors: 10,
+        };
+        mbr.write_into(&mut disk).unwrap();
+
+        // valid first EBR whose link to the next EBR points past u32::MAX
+        let mut ebr = [0; 512];
+        ebr[446 + 4] = 0x83;
+        ebr[446 + 8..446 + 12].copy_from_slice(&1_u32.to_le_bytes());
+        ebr[446 + 12..446 + 16].copy_from_slice(&1_u32.to_le_bytes());
+        ebr[462 + 4] = 0x0f;
+        ebr[462 + 8..462 + 12].copy_from_slice(&20_u32.to_le_bytes());
+        ebr[462 + 12..462 + 16].copy_from_slice(&1_u32.to_le_bytes());
+        ebr[510..512].copy_from_slice(&BOOT_SIGNATURE);
+        disk.sectors.insert(u64::from(start), ebr);
+
+        assert!(matches!(
+            MBR::read_from(&mut disk, ss),
+            Err(Error::InconsistentEBR)
+        ));
     }
 
     #[test]
