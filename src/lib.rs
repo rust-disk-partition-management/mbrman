@@ -211,7 +211,6 @@ use core::ops::{Index, IndexMut};
 use io::DiskRead;
 #[cfg(feature = "alloc")]
 use io::{DiskSize, DiskWrite};
-use thiserror::Error;
 
 #[cfg(feature = "alloc")]
 const DEFAULT_ALIGN: u32 = 2048;
@@ -247,7 +246,7 @@ fn chunk<const N: usize>(bytes: &[u8], offset: usize) -> [u8; N] {
 }
 
 /// An error
-#[derive(Debug, Error)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
     /// The CHS address requested cannot be represented in CHS
@@ -255,44 +254,70 @@ pub enum Error {
     /// # Remark
     ///
     /// There is a hard limit around 8GB for CHS addressing.
-    #[error("exceeded the maximum limit of CHS")]
     LBAExceedsMaximumCHS,
     /// The CHS address requested exceeds the number of cylinders in the disk
-    #[error("exceeded the maximum number of cylinders on disk")]
     LBAExceedsMaximumCylinders,
     /// I/O errors.
-    #[error("generic I/O error")]
-    Io(#[from] io::Error),
+    Io(io::Error),
     /// Inconsistent extended boot record
-    #[error("inconsistent extended boot record")]
     InconsistentEBR,
     /// No extended partition
-    #[error("no extended partition")]
     NoExtendedPartition,
     /// The EBR starts before the extended partition
-    #[error("EBR starts before the extended partition")]
     EBRStartsBeforeExtendedPartition,
     /// The EBR starts too close to the extended partition
-    #[error("EBR starts too close to the end of the extended partition")]
     EBRStartsTooCloseToTheEndOfExtendedPartition,
     /// The EBR ends after the extended partition
-    #[error("EBR ends after the extended partition")]
     EBREndsAfterExtendedPartition,
     /// Not enough sectors to create a logical partition
-    #[error("not enough sectors to create a logical partition")]
     NotEnoughSectorsToCreateLogicalPartition,
     /// An operation that required to find a partition, was unable to find that partition.
-    #[error("partition not found")]
     PartitionNotFound,
     /// An error that occurs when there is not enough space left on the table to continue.
-    #[error("no space left")]
     NoSpaceLeft,
     /// MBR doesn't have the expected signature value
-    #[error("invalid MBR signature")]
     InvalidSignature,
     /// Partition has invalid boot flag
-    #[error("partition has invalid boot flag")]
     InvalidBootFlag,
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Error::LBAExceedsMaximumCHS => "exceeded the maximum limit of CHS",
+            Error::LBAExceedsMaximumCylinders => "exceeded the maximum number of cylinders on disk",
+            Error::Io(_) => "generic I/O error",
+            Error::InconsistentEBR => "inconsistent extended boot record",
+            Error::NoExtendedPartition => "no extended partition",
+            Error::EBRStartsBeforeExtendedPartition => "EBR starts before the extended partition",
+            Error::EBRStartsTooCloseToTheEndOfExtendedPartition => {
+                "EBR starts too close to the end of the extended partition"
+            }
+            Error::EBREndsAfterExtendedPartition => "EBR ends after the extended partition",
+            Error::NotEnoughSectorsToCreateLogicalPartition => {
+                "not enough sectors to create a logical partition"
+            }
+            Error::PartitionNotFound => "partition not found",
+            Error::NoSpaceLeft => "no space left",
+            Error::InvalidSignature => "invalid MBR signature",
+            Error::InvalidBootFlag => "partition has invalid boot flag",
+        })
+    }
+}
+
+impl core::error::Error for Error {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Error::Io(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+impl From<io::Error> for Error {
+    fn from(err: io::Error) -> Error {
+        Error::Io(err)
+    }
 }
 
 /// A type representing a MBR partition table including its partition, the sector size of the disk
@@ -1878,6 +1903,57 @@ mod tests {
     use std::fs::File;
     use std::io::{Cursor, Read, Seek, SeekFrom, Write};
     use std::vec;
+
+    #[test]
+    fn error_messages() {
+        use std::error::Error as _;
+        use std::string::ToString;
+
+        let cases = [
+            (
+                Error::LBAExceedsMaximumCHS,
+                "exceeded the maximum limit of CHS",
+            ),
+            (
+                Error::LBAExceedsMaximumCylinders,
+                "exceeded the maximum number of cylinders on disk",
+            ),
+            (
+                Error::Io(io::ErrorKind::UnexpectedEof.into()),
+                "generic I/O error",
+            ),
+            (Error::InconsistentEBR, "inconsistent extended boot record"),
+            (Error::NoExtendedPartition, "no extended partition"),
+            (
+                Error::EBRStartsBeforeExtendedPartition,
+                "EBR starts before the extended partition",
+            ),
+            (
+                Error::EBRStartsTooCloseToTheEndOfExtendedPartition,
+                "EBR starts too close to the end of the extended partition",
+            ),
+            (
+                Error::EBREndsAfterExtendedPartition,
+                "EBR ends after the extended partition",
+            ),
+            (
+                Error::NotEnoughSectorsToCreateLogicalPartition,
+                "not enough sectors to create a logical partition",
+            ),
+            (Error::PartitionNotFound, "partition not found"),
+            (Error::NoSpaceLeft, "no space left"),
+            (Error::InvalidSignature, "invalid MBR signature"),
+            (Error::InvalidBootFlag, "partition has invalid boot flag"),
+        ];
+        for (err, msg) in cases {
+            assert_eq!(err.to_string(), msg);
+            assert_eq!(err.source().is_some(), matches!(err, Error::Io(_)));
+        }
+
+        let err = Error::from(io::Error::from(io::ErrorKind::UnexpectedEof));
+        let source = err.source().unwrap().downcast_ref::<io::Error>().unwrap();
+        assert_eq!(source.kind(), io::ErrorKind::UnexpectedEof);
+    }
 
     const DISK1: &str = "tests/fixtures/disk1.img";
     const DISK2: &str = "tests/fixtures/disk2.img";

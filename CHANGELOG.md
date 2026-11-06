@@ -4,12 +4,16 @@
 
 Breaking changes:
 
-- Remove the `bincode`, `serde`, `serde-big-array` and `bitvec` dependencies; `thiserror` is the only dependency left (#40)
+- Remove the `bincode`, `serde`, `serde-big-array` and `bitvec` dependencies (#40)
 - `MBRHeader`, `MBRPartitionEntry` and `CHS` no longer implement serde's `Serialize`/`Deserialize`. Use the new `from_bytes`/`to_bytes` methods to encode them in memory (#40)
 - Remove `Error::Deserialize` and `Error::Serialize` (#40)
 - A truncated boot record now returns `Error::Io` with `UnexpectedEof` (#40)
 - `MBR::read_from` only treats the first EBR as missing when its signature is invalid; I/O errors and invalid entries there are now returned instead of being ignored (#40)
 - New default `std` feature: builds with `default-features = false` must enable it to keep the `std::io` integration
+
+Changed:
+
+- Remove the `thiserror` dependency: mbrman has no dependencies left. `Error` keeps the same variants and messages
 
 Added:
 
