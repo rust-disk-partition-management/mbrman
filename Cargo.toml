@@ -16,5 +16,12 @@ include = ["src/**/*.rs", "tests/fixtures/*.img", "README.md", "CHANGELOG.md", "
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+default = ["std"]
+# Implement the disk traits for `std::io` types and use `std::io::Error`
+std = ["alloc", "thiserror/std"]
+# The `MBR` type, to edit partition tables
+alloc = []
+
 [dependencies]
-thiserror = "2.0.12"
+thiserror = { version = "2.0.12", default-features = false }
