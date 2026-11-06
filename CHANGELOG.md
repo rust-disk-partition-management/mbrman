@@ -17,7 +17,7 @@ Changed:
 
 Added:
 
-- `no_std` support. The default `std` feature implements the new `io` traits for `std::io` types; without it, implement `io::DiskSize`, `io::DiskRead` and `io::DiskWrite` for your disk. The `MBR` type needs the `alloc` feature
+- `no_std` support. The default `std` feature implements the new `io` traits for `std::io` types; without it, implement `io::DiskSize`, `io::DiskRead` and `io::DiskWrite` for your disk. The `MBR` type needs the `alloc` feature. Without `std`, `io::Error` only carries an `io::ErrorKind`
 - `MBRHeader::read_logical_partitions`, an iterator that reads the EBR chain one logical partition at a time, without allocating
 - `MBRHeader::from_bytes`/`to_bytes` to decode and encode a 512-byte MBR sector, with validation (#40)
 - `MBRPartitionEntry::from_bytes`/`to_bytes` and `CHS::from_bytes`/`to_bytes` to decode and encode raw entries and CHS addresses (#40)

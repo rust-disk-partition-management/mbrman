@@ -13,8 +13,9 @@
 //!
 //! Without `std`, implement the traits for your block device. [`Error`] and [`ErrorKind`]
 //! are then small stand-ins with the same API as the subset of `std::io` they provide, so
-//! code that sticks to that subset builds the same whether `std` is enabled or not. Without
-//! `alloc` either, an [`Error`] is only an [`ErrorKind`]: build it with `Error::from(kind)`.
+//! code that sticks to that subset builds the same whether `std` is enabled or not. An
+//! [`Error`] is then only an [`ErrorKind`]: map your device errors to a kind and build the
+//! error with `Error::from(kind)`.
 //!
 //! # Types that also implement `std::io`
 //!
@@ -154,12 +155,7 @@ impl<T: std::io::Write + std::io::Seek + ?Sized> DiskWrite for T {
 /// them must keep building when another crate enables `std`.
 #[cfg(not(feature = "std"))]
 mod error {
-    #[cfg(feature = "alloc")]
-    use alloc::boxed::Box;
     use core::fmt;
-
-    #[cfg(feature = "alloc")]
-    type Custom = Box<dyn core::error::Error + Send + Sync>;
 
     /// The category of an I/O [`Error`], like `std::io::ErrorKind`.
     #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -219,12 +215,9 @@ mod error {
         }
     }
 
-    /// An I/O error, like `std::io::Error`: an [`ErrorKind`], optionally with the error
-    /// that caused it (with the `alloc` feature).
+    /// An I/O error, like `std::io::Error`, reduced to its [`ErrorKind`].
     pub struct Error {
         kind: ErrorKind,
-        #[cfg(feature = "alloc")]
-        error: Option<Custom>,
     }
 
     impl Error {
@@ -232,87 +225,26 @@ mod error {
         pub fn kind(&self) -> ErrorKind {
             self.kind
         }
-
-        fn payload(&self) -> Option<&(dyn core::error::Error + Send + Sync + 'static)> {
-            #[cfg(feature = "alloc")]
-            return self.error.as_deref();
-            #[cfg(not(feature = "alloc"))]
-            return None;
-        }
-    }
-
-    #[cfg(feature = "alloc")]
-    impl Error {
-        /// Create an error of the given kind from an arbitrary error payload.
-        pub fn new<E>(kind: ErrorKind, error: E) -> Error
-        where
-            E: Into<Custom>,
-        {
-            Error {
-                kind,
-                error: Some(error.into()),
-            }
-        }
-
-        /// Create an error of kind [`ErrorKind::Other`] from an arbitrary error payload.
-        pub fn other<E>(error: E) -> Error
-        where
-            E: Into<Custom>,
-        {
-            Error::new(ErrorKind::Other, error)
-        }
-
-        /// Return a reference to the error payload, if any.
-        pub fn get_ref(&self) -> Option<&(dyn core::error::Error + Send + Sync + 'static)> {
-            self.error.as_deref()
-        }
-
-        /// Return a mutable reference to the error payload, if any.
-        pub fn get_mut(&mut self) -> Option<&mut (dyn core::error::Error + Send + Sync + 'static)> {
-            self.error.as_deref_mut()
-        }
-
-        /// Consume the error and return its payload, if any.
-        pub fn into_inner(self) -> Option<Custom> {
-            self.error
-        }
     }
 
     impl From<ErrorKind> for Error {
         fn from(kind: ErrorKind) -> Error {
-            Error {
-                kind,
-                #[cfg(feature = "alloc")]
-                error: None,
-            }
+            Error { kind }
         }
     }
 
     impl fmt::Debug for Error {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            match self.payload() {
-                Some(error) => f
-                    .debug_struct("Custom")
-                    .field("kind", &self.kind)
-                    .field("error", &error)
-                    .finish(),
-                None => f.debug_tuple("Kind").field(&self.kind).finish(),
-            }
+            // the same output as std for an error built from a kind
+            f.debug_tuple("Kind").field(&self.kind).finish()
         }
     }
 
     impl fmt::Display for Error {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            match self.payload() {
-                Some(error) => fmt::Display::fmt(error, f),
-                None => self.kind.fmt(f),
-            }
+            self.kind.fmt(f)
         }
     }
 
-    impl core::error::Error for Error {
-        fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
-            self.payload().and_then(|error| error.source())
-        }
-    }
+    impl core::error::Error for Error {}
 }
