@@ -21,17 +21,46 @@ A library for reading and managing MBR partition tables.
 
 mbrman works without `std`: disable the default features.
 
-- With the `alloc` feature, everything is available except the `std::io` integration.
-  Implement the traits of the `io` module (`DiskSize`, `DiskRead` and `DiskWrite`) for your
-  disk.
-- Without `alloc`, you can read a partition table: `MBRHeader::read_from` reads the MBR and
-  `MBRHeader::read_logical_partitions` reads the EBR chain one logical partition at a time.
-  The `MBR` type, to edit partition tables, needs `alloc`.
+- With the `alloc` feature, everything is available except the `std::io` integration. The
+  `MBR` type, to edit partition tables, needs `alloc`.
+- Without `alloc`, you can read a partition table: `MBRHeader::from_bytes` decodes the MBR and
+  `MBRHeader::ebr_walk` reads the EBR chain one logical partition at a time.
 
 ```toml
 [dependencies]
 mbrman = { version = "0.7", default-features = false, features = ["alloc"] }
 ```
+
+## Disk access
+
+mbrman does no I/O of its own: it turns 512-byte boot records into partition tables and back,
+and tells you where on the disk they go. With the default `std` feature, `MBR::read_from` and
+`MBR::write_into` do the I/O for you on any `std::io` type. Without `std`, or in async code,
+you do it with whatever your block device offers, with no trait to implement:
+
+```rust
+// the bytes of a disk image, standing in for your block device
+let disk = std::fs::read("tests/fixtures/disk2.img").expect("could not read disk");
+
+// read: the reader asks for each 512-byte boot record, one at a time
+let mut reader = mbrman::MBR::reader(512, disk.len() as u64);
+while let Some(offset) = reader.next_offset().expect("invalid EBR chain") {
+    let start = offset as usize;
+    reader
+        .feed(disk[start..start + 512].try_into().unwrap())
+        .expect("could not read a boot record");
+}
+let mut mbr = reader.finish().expect("could not read the partition table");
+
+// write: the whole table is validated first, then each boot record comes with its offset
+let mut copy = vec![0; disk.len()];
+for chunk in mbr.chunks().expect("invalid partition table") {
+    let start = chunk.offset as usize;
+    copy[start..start + 512].copy_from_slice(&chunk.data);
+}
+```
+
+See the crate documentation for an async example.
 
 ## Examples
 

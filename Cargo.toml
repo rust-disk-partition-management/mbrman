@@ -18,7 +18,7 @@ include = ["src/**/*.rs", "tests/fixtures/*.img", "README.md", "CHANGELOG.md", "
 
 [features]
 default = ["std"]
-# Implement the disk traits for `std::io` types and use `std::io::Error`
+# Read and write partition tables on `std::io` types, and `Error::Io`
 std = ["alloc"]
 # The `MBR` type, to edit partition tables
 alloc = []
