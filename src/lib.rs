@@ -1925,8 +1925,9 @@ pub struct MBRReader {
 #[cfg(feature = "alloc")]
 impl MBRReader {
     /// Return the byte offset of the next boot record to read, or `None` when the whole
-    /// partition table has been read. `None` is also returned after `feed` failed: the reader
-    /// then asks for nothing more, and `finish` returns `Error::OutOfSequence`.
+    /// partition table has been read. `None` is also returned after `feed` failed on an EBR:
+    /// the reader then asks for nothing more. After `feed` failed on the MBR, it asks for offset
+    /// 0 again. In both cases `finish` returns `Error::OutOfSequence`.
     ///
     /// Return `Error::InconsistentEBR` if the EBR the chain links to cannot be addressed.
     pub fn next_offset(&self) -> Result<Option<u64>> {
@@ -2339,6 +2340,12 @@ mod core_tests {
             Err(Error::OutOfSequence)
         ));
         assert_eq!(reader.finish().unwrap().logical_partitions.len(), 5);
+
+        // a failed MBR feed asks for the MBR again
+        let mut reader = MBR::reader(512, DISK2.len() as u64);
+        assert!(reader.feed(&[0; 512]).is_err());
+        assert_eq!(reader.next_offset().unwrap(), Some(0));
+        assert!(matches!(reader.finish(), Err(Error::OutOfSequence)));
     }
 
     #[cfg(feature = "alloc")]
