@@ -31,18 +31,56 @@ mbrman works without `std`: disable the default features.
 mbrman = { version = "0.7", default-features = false, features = ["alloc"] }
 ```
 
-## Disk access
+### Disk access
 
 mbrman does no I/O of its own: it turns 512-byte boot records into partition tables and back,
 and tells you where on the disk they go. With the default `std` feature, `MBR::read_from` and
-`MBR::write_into` do the I/O for you on any `std::io` type. Without `std`, or in async code,
-you do it with whatever your block device offers, with no trait to implement:
+`MBR::write_into` do the I/O for you on any `std::io` type, such as `std::fs::File` or
+`std::io::Cursor`. Without `std`, or in async code, you do it with whatever your block device
+offers:
+
+- To read, `MBR::reader` asks for one boot record at a time: call `next_offset`, read the
+  512 bytes at that byte offset and `feed` them, until `next_offset` returns `None`. Then
+  `finish` builds the `MBR`. Without `alloc`, decode the MBR with `MBRHeader::from_bytes`
+  and walk the EBR chain the same way with `MBRHeader::ebr_walk`.
+- To write, `MBR::chunks` validates the whole partition table, then yields every boot
+  record to write with its byte offset. Nothing is yielded if the table is invalid. Without
+  `alloc`, `MBRHeader::to_bytes` encodes the MBR, which goes at offset 0.
+
+Without `std`, the I/O errors stay yours: mbrman only returns its own `Error`. Boot records
+are 512 bytes whatever the sector size: on a device with larger sectors, read the sector that
+contains the record and, to write, update the record inside it before writing it back.
+
+### With `alloc`
+
+Write a partition table with an extended partition and a logical volume to a block device,
+then read it back.
 
 ```rust
-// the bytes of a disk image, standing in for your block device
-let disk = std::fs::read("tests/fixtures/disk2.img").expect("could not read disk");
+// a disk in memory, standing in for your block device
+let mut disk = [0_u8; 64 * 512];
 
-// read: the reader asks for each 512-byte boot record, one at a time
+// a partition table with an extended partition and a logical volume
+let mut mbr = mbrman::MBR::new(512, disk.len() as u64, [0xff; 4]);
+mbr[1] = mbrman::MBRPartitionEntry {
+    boot: mbrman::BOOT_INACTIVE,
+    first_chs: mbrman::CHS::empty(),
+    sys: 0x0f,
+    last_chs: mbrman::CHS::empty(),
+    starting_lba: 1,
+    sectors: mbr.disk_size - 1,
+};
+mbr.align = 1;
+mbr.push(0x83, 1, mbr.disk_size - 1)
+    .expect("could not add the logical volume");
+
+// write it: the whole table is validated first, then each boot record comes with its offset
+for chunk in mbr.chunks().expect("invalid partition table") {
+    let start = chunk.offset as usize;
+    disk[start..start + 512].copy_from_slice(&chunk.data);
+}
+
+// read it back: the reader asks for each 512-byte boot record, one at a time
 let mut reader = mbrman::MBR::reader(512, disk.len() as u64);
 while let Some(offset) = reader.next_offset().expect("invalid EBR chain") {
     let start = offset as usize;
@@ -50,17 +88,59 @@ while let Some(offset) = reader.next_offset().expect("invalid EBR chain") {
         .feed(disk[start..start + 512].try_into().unwrap())
         .expect("could not read a boot record");
 }
-let mut mbr = reader.finish().expect("could not read the partition table");
-
-// write: the whole table is validated first, then each boot record comes with its offset
-let mut copy = vec![0; disk.len()];
-for chunk in mbr.chunks().expect("invalid partition table") {
-    let start = chunk.offset as usize;
-    copy[start..start + 512].copy_from_slice(&chunk.data);
-}
+let read = reader.finish().expect("could not read the partition table");
+assert_eq!(read.logical_partitions, mbr.logical_partitions);
 ```
 
-See the crate documentation for an async example.
+### Without `alloc`
+
+Read the logical partitions of a disk without allocating. `MBRHeader::to_bytes` gives back
+the 512 bytes of the MBR, to write at offset 0.
+
+```rust
+// the bytes of a disk image, standing in for your block device
+let disk = std::fs::read("tests/fixtures/disk2.img").expect("could not read disk");
+let sector = |offset: u64| -> [u8; 512] {
+    let start = offset as usize;
+    disk[start..start + 512].try_into().unwrap()
+};
+
+let header = mbrman::MBRHeader::from_bytes(&sector(0))
+    .expect("could not read the MBR header");
+let mut walk = header.ebr_walk(512);
+while let Some(offset) = walk.next_offset().expect("invalid EBR chain") {
+    if let Some(l) = walk.feed(&sector(offset)).expect("could not read an EBR") {
+        println!("logical partition: starting lba = {}", l.partition.starting_lba);
+    }
+}
+
+let mbr_bytes = header.to_bytes().expect("could not encode the MBR header");
+assert_eq!(mbr_bytes.len(), 512);
+```
+
+### Async
+
+The same loops work with any async runtime: only the I/O calls change. `dev` is your async
+block device. The crate documentation has a complete example, which runs as a test.
+
+```rust,ignore
+async fn read_mbr(dev: &mut Device) -> Result<MBR, Error> {
+    let mut reader = MBR::reader(512, dev.size());
+    let mut buf = [0; 512];
+    while let Some(offset) = reader.next_offset()? {
+        dev.read_at(offset, &mut buf).await?;
+        reader.feed(&buf)?;
+    }
+    Ok(reader.finish()?)
+}
+
+async fn write_mbr(dev: &mut Device, mbr: &mut MBR) -> Result<(), Error> {
+    for chunk in mbr.chunks()? {
+        dev.write_at(chunk.offset, &chunk.data).await?;
+    }
+    Ok(())
+}
+```
 
 ## Examples
 

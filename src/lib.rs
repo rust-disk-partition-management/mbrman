@@ -13,21 +13,21 @@
 //!
 //! - With the `alloc` feature, everything is available except the `std::io` integration. The
 //!   `MBR` type, to edit partition tables, needs `alloc`.
-//! - Without `alloc`, you can read a partition table: `MBRHeader::from_bytes` decodes the MBR
-//!   and `MBRHeader::ebr_walk` reads the EBR chain one logical partition at a time.
+//! - Without `alloc`, you can read a partition table: `MBRHeader::from_bytes` decodes the MBR and
+//!   `MBRHeader::ebr_walk` reads the EBR chain one logical partition at a time.
 //!
 //! ```toml
 //! [dependencies]
 //! mbrman = { version = "0.7", default-features = false, features = ["alloc"] }
 //! ```
 //!
-//! ## Disk access
+//! ### Disk access
 //!
-//! mbrman does no I/O of its own: it turns 512-byte boot records into partition tables and
-//! back, and tells you where on the disk they go. With the default `std` feature,
-//! `MBR::read_from` and `MBR::write_into` do the I/O for you on any `std::io` type, such as
-//! `std::fs::File` or `std::io::Cursor`. Without `std`, or in async code, you do it with
-//! whatever your block device offers:
+//! mbrman does no I/O of its own: it turns 512-byte boot records into partition tables and back,
+//! and tells you where on the disk they go. With the default `std` feature, `MBR::read_from` and
+//! `MBR::write_into` do the I/O for you on any `std::io` type, such as `std::fs::File` or
+//! `std::io::Cursor`. Without `std`, or in async code, you do it with whatever your block device
+//! offers:
 //!
 //! - To read, `MBR::reader` asks for one boot record at a time: call `next_offset`, read the
 //!   512 bytes at that byte offset and `feed` them, until `next_offset` returns `None`. Then
@@ -37,14 +37,16 @@
 //!   record to write with its byte offset. Nothing is yielded if the table is invalid. Without
 //!   `alloc`, `MBRHeader::to_bytes` encodes the MBR, which goes at offset 0.
 //!
-//! The I/O errors stay yours: mbrman only returns its own [`Error`]. Boot records are 512
-//! bytes whatever the sector size: on a device with larger sectors, read the sector that
+//! Without `std`, the I/O errors stay yours: mbrman only returns its own `Error`. Boot records
+//! are 512 bytes whatever the sector size: on a device with larger sectors, read the sector that
 //! contains the record and, to write, update the record inside it before writing it back.
 //!
-//! ### A block device without `std`
+//! ### With `alloc`
+//!
+//! Write a partition table with an extended partition and a logical volume to a block device,
+//! then read it back.
 //!
 //! ```rust
-//! # fn main() -> Result<(), mbrman::Error> {
 //! # #[cfg(feature = "alloc")] {
 //! // a disk in memory, standing in for your block device
 //! let mut disk = [0_u8; 64 * 512];
@@ -60,30 +62,60 @@
 //!     sectors: mbr.disk_size - 1,
 //! };
 //! mbr.align = 1;
-//! mbr.push(0x83, 1, mbr.disk_size - 1)?;
+//! mbr.push(0x83, 1, mbr.disk_size - 1)
+//!     .expect("could not add the logical volume");
 //!
-//! // write it
-//! for chunk in mbr.chunks()? {
+//! // write it: the whole table is validated first, then each boot record comes with its offset
+//! for chunk in mbr.chunks().expect("invalid partition table") {
 //!     let start = chunk.offset as usize;
 //!     disk[start..start + 512].copy_from_slice(&chunk.data);
 //! }
 //!
-//! // read it back
+//! // read it back: the reader asks for each 512-byte boot record, one at a time
 //! let mut reader = mbrman::MBR::reader(512, disk.len() as u64);
-//! while let Some(offset) = reader.next_offset()? {
+//! while let Some(offset) = reader.next_offset().expect("invalid EBR chain") {
 //!     let start = offset as usize;
-//!     reader.feed(disk[start..start + 512].try_into().unwrap())?;
+//!     reader
+//!         .feed(disk[start..start + 512].try_into().unwrap())
+//!         .expect("could not read a boot record");
 //! }
-//! let read = reader.finish()?;
+//! let read = reader.finish().expect("could not read the partition table");
 //! assert_eq!(read.logical_partitions, mbr.logical_partitions);
-//! # }
-//! # Ok(())
 //! # }
 //! ```
 //!
-//! ### An async block device
+//! ### Without `alloc`
 //!
-//! The same loops work with any async runtime: only the I/O calls change.
+//! Read the logical partitions of a disk without allocating. `MBRHeader::to_bytes` gives back
+//! the 512 bytes of the MBR, to write at offset 0.
+//!
+//! ```rust
+//! # #[cfg(feature = "std")] {
+//! // the bytes of a disk image, standing in for your block device
+//! let disk = std::fs::read("tests/fixtures/disk2.img").expect("could not read disk");
+//! let sector = |offset: u64| -> [u8; 512] {
+//!     let start = offset as usize;
+//!     disk[start..start + 512].try_into().unwrap()
+//! };
+//!
+//! let header = mbrman::MBRHeader::from_bytes(&sector(0))
+//!     .expect("could not read the MBR header");
+//! let mut walk = header.ebr_walk(512);
+//! while let Some(offset) = walk.next_offset().expect("invalid EBR chain") {
+//!     if let Some(l) = walk.feed(&sector(offset)).expect("could not read an EBR") {
+//!         println!("logical partition: starting lba = {}", l.partition.starting_lba);
+//!     }
+//! }
+//!
+//! let mbr_bytes = header.to_bytes().expect("could not encode the MBR header");
+//! assert_eq!(mbr_bytes.len(), 512);
+//! # }
+//! ```
+//!
+//! ### Async
+//!
+//! The same loops work with any async runtime: only the I/O calls change. `dev` is your async
+//! block device.
 //!
 //! ```rust
 //! # #[cfg(feature = "alloc")] {
@@ -93,6 +125,10 @@
 //! struct Device(Vec<u8>);
 //!
 //! impl Device {
+//!     fn size(&self) -> u64 {
+//!         self.0.len() as u64
+//!     }
+//!
 //!     async fn read_at(&mut self, offset: u64, buf: &mut [u8; 512]) -> Result<(), Error> {
 //!         let start = usize::try_from(offset).map_err(|_| Error::Device)?;
 //!         buf.copy_from_slice(self.0.get(start..start + 512).ok_or(Error::Device)?);
@@ -120,7 +156,7 @@
 //! }
 //!
 //! async fn read_mbr(dev: &mut Device) -> Result<MBR, Error> {
-//!     let mut reader = MBR::reader(512, dev.0.len() as u64);
+//!     let mut reader = MBR::reader(512, dev.size());
 //!     let mut buf = [0; 512];
 //!     while let Some(offset) = reader.next_offset()? {
 //!         dev.read_at(offset, &mut buf).await?;
@@ -138,7 +174,7 @@
 //!
 //! async fn run() -> Result<(), Error> {
 //!     let mut dev = Device(vec![0; 64 * 512]);
-//!     let mut mbr = MBR::new(512, dev.0.len() as u64, [0xff; 4]);
+//!     let mut mbr = MBR::new(512, dev.size(), [0xff; 4]);
 //!     write_mbr(&mut dev, &mut mbr).await?;
 //!     assert_eq!(read_mbr(&mut dev).await?.header.disk_signature, [0xff; 4]);
 //!     Ok(())
