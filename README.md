@@ -39,13 +39,17 @@ and tells you where on the disk they go. With the default `std` feature, `MBR::r
 `std::io::Cursor`. Without `std`, or in async code, you do it with whatever your block device
 offers:
 
-- To read, `MBR::reader` asks for one boot record at a time: call `next_offset`, read the
-  512 bytes at that byte offset and `feed` them, until `next_offset` returns `None`. Then
+- To read, `MBR::reader` asks for one boot record at a time: call `next_lba`, read the
+  first 512 bytes of that sector and `feed` them, until `next_lba` returns `None`. Then
   `finish` builds the `MBR`. Without `alloc`, decode the MBR with `MBRHeader::from_bytes`
   and walk the EBR chain the same way with `MBRHeader::ebr_walk`.
 - To write, `MBR::chunks` validates the whole partition table, then yields every boot
-  record to write with its byte offset. Nothing is yielded if the table is invalid. Without
-  `alloc`, `MBRHeader::to_bytes` encodes the MBR, which goes at offset 0.
+  record to write with its LBA. Nothing is yielded if the table is invalid. Without
+  `alloc`, `MBRHeader::to_bytes` encodes the MBR, which goes at LBA 0.
+
+LBAs count sectors of the size given to `MBR::reader` or `MBR::new`, so a block device takes
+them as they are. For a byte-addressed device, the byte offset is
+`u64::from(lba) * u64::from(sector_size)`.
 
 Without `std`, the I/O errors stay yours: mbrman only returns its own `Error`. Boot records
 are 512 bytes whatever the sector size: on a device with larger sectors, read the sector that
@@ -74,16 +78,16 @@ mbr.align = 1;
 mbr.push(0x83, 1, mbr.disk_size - 1)
     .expect("could not add the logical volume");
 
-// write it: the whole table is validated first, then each boot record comes with its offset
+// write it: the whole table is validated first, then each boot record comes with its LBA
 for chunk in mbr.chunks().expect("invalid partition table") {
-    let start = chunk.offset as usize;
+    let start = chunk.lba as usize * 512;
     disk[start..start + 512].copy_from_slice(&chunk.data);
 }
 
 // read it back: the reader asks for each 512-byte boot record, one at a time
 let mut reader = mbrman::MBR::reader(512, disk.len() as u64);
-while let Some(offset) = reader.next_offset().expect("invalid EBR chain") {
-    let start = offset as usize;
+while let Some(lba) = reader.next_lba().expect("invalid EBR chain") {
+    let start = lba as usize * 512;
     reader
         .feed(disk[start..start + 512].try_into().unwrap())
         .expect("could not read a boot record");
@@ -95,21 +99,21 @@ assert_eq!(read.logical_partitions, mbr.logical_partitions);
 ### Without `alloc`
 
 Read the logical partitions of a disk without allocating. `MBRHeader::to_bytes` gives back
-the 512 bytes of the MBR, to write at offset 0.
+the 512 bytes of the MBR, to write at LBA 0.
 
 ```rust
 // the bytes of a disk image, standing in for your block device
 let disk = std::fs::read("tests/fixtures/disk2.img").expect("could not read disk");
-let sector = |offset: u64| -> [u8; 512] {
-    let start = offset as usize;
+let sector = |lba: u32| -> [u8; 512] {
+    let start = lba as usize * 512;
     disk[start..start + 512].try_into().unwrap()
 };
 
 let header = mbrman::MBRHeader::from_bytes(&sector(0))
     .expect("could not read the MBR header");
-let mut walk = header.ebr_walk(512);
-while let Some(offset) = walk.next_offset().expect("invalid EBR chain") {
-    if let Some(l) = walk.feed(&sector(offset)).expect("could not read an EBR") {
+let mut walk = header.ebr_walk();
+while let Some(lba) = walk.next_lba().expect("invalid EBR chain") {
+    if let Some(l) = walk.feed(&sector(lba)).expect("could not read an EBR") {
         println!("logical partition: starting lba = {}", l.partition.starting_lba);
     }
 }
@@ -127,8 +131,8 @@ block device. The crate documentation has a complete example, which runs as a te
 async fn read_mbr(dev: &mut Device) -> Result<MBR, Error> {
     let mut reader = MBR::reader(512, dev.size());
     let mut buf = [0; 512];
-    while let Some(offset) = reader.next_offset()? {
-        dev.read_at(offset, &mut buf).await?;
+    while let Some(lba) = reader.next_lba()? {
+        dev.read_block(lba, &mut buf).await?;
         reader.feed(&buf)?;
     }
     Ok(reader.finish()?)
@@ -136,7 +140,7 @@ async fn read_mbr(dev: &mut Device) -> Result<MBR, Error> {
 
 async fn write_mbr(dev: &mut Device, mbr: &mut MBR) -> Result<(), Error> {
     for chunk in mbr.chunks()? {
-        dev.write_at(chunk.offset, &chunk.data).await?;
+        dev.write_block(chunk.lba, &chunk.data).await?;
     }
     Ok(())
 }

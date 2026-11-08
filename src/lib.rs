@@ -29,13 +29,17 @@
 //! `std::io::Cursor`. Without `std`, or in async code, you do it with whatever your block device
 //! offers:
 //!
-//! - To read, `MBR::reader` asks for one boot record at a time: call `next_offset`, read the
-//!   512 bytes at that byte offset and `feed` them, until `next_offset` returns `None`. Then
+//! - To read, `MBR::reader` asks for one boot record at a time: call `next_lba`, read the
+//!   first 512 bytes of that sector and `feed` them, until `next_lba` returns `None`. Then
 //!   `finish` builds the `MBR`. Without `alloc`, decode the MBR with `MBRHeader::from_bytes`
 //!   and walk the EBR chain the same way with `MBRHeader::ebr_walk`.
 //! - To write, `MBR::chunks` validates the whole partition table, then yields every boot
-//!   record to write with its byte offset. Nothing is yielded if the table is invalid. Without
-//!   `alloc`, `MBRHeader::to_bytes` encodes the MBR, which goes at offset 0.
+//!   record to write with its LBA. Nothing is yielded if the table is invalid. Without
+//!   `alloc`, `MBRHeader::to_bytes` encodes the MBR, which goes at LBA 0.
+//!
+//! LBAs count sectors of the size given to `MBR::reader` or `MBR::new`, so a block device takes
+//! them as they are. For a byte-addressed device, the byte offset is
+//! `u64::from(lba) * u64::from(sector_size)`.
 //!
 //! Without `std`, the I/O errors stay yours: mbrman only returns its own `Error`. Boot records
 //! are 512 bytes whatever the sector size: on a device with larger sectors, read the sector that
@@ -65,16 +69,16 @@
 //! mbr.push(0x83, 1, mbr.disk_size - 1)
 //!     .expect("could not add the logical volume");
 //!
-//! // write it: the whole table is validated first, then each boot record comes with its offset
+//! // write it: the whole table is validated first, then each boot record comes with its LBA
 //! for chunk in mbr.chunks().expect("invalid partition table") {
-//!     let start = chunk.offset as usize;
+//!     let start = chunk.lba as usize * 512;
 //!     disk[start..start + 512].copy_from_slice(&chunk.data);
 //! }
 //!
 //! // read it back: the reader asks for each 512-byte boot record, one at a time
 //! let mut reader = mbrman::MBR::reader(512, disk.len() as u64);
-//! while let Some(offset) = reader.next_offset().expect("invalid EBR chain") {
-//!     let start = offset as usize;
+//! while let Some(lba) = reader.next_lba().expect("invalid EBR chain") {
+//!     let start = lba as usize * 512;
 //!     reader
 //!         .feed(disk[start..start + 512].try_into().unwrap())
 //!         .expect("could not read a boot record");
@@ -87,22 +91,22 @@
 //! ### Without `alloc`
 //!
 //! Read the logical partitions of a disk without allocating. `MBRHeader::to_bytes` gives back
-//! the 512 bytes of the MBR, to write at offset 0.
+//! the 512 bytes of the MBR, to write at LBA 0.
 //!
 //! ```rust
 //! # #[cfg(feature = "std")] {
 //! // the bytes of a disk image, standing in for your block device
 //! let disk = std::fs::read("tests/fixtures/disk2.img").expect("could not read disk");
-//! let sector = |offset: u64| -> [u8; 512] {
-//!     let start = offset as usize;
+//! let sector = |lba: u32| -> [u8; 512] {
+//!     let start = lba as usize * 512;
 //!     disk[start..start + 512].try_into().unwrap()
 //! };
 //!
 //! let header = mbrman::MBRHeader::from_bytes(&sector(0))
 //!     .expect("could not read the MBR header");
-//! let mut walk = header.ebr_walk(512);
-//! while let Some(offset) = walk.next_offset().expect("invalid EBR chain") {
-//!     if let Some(l) = walk.feed(&sector(offset)).expect("could not read an EBR") {
+//! let mut walk = header.ebr_walk();
+//! while let Some(lba) = walk.next_lba().expect("invalid EBR chain") {
+//!     if let Some(l) = walk.feed(&sector(lba)).expect("could not read an EBR") {
 //!         println!("logical partition: starting lba = {}", l.partition.starting_lba);
 //!     }
 //! }
@@ -129,14 +133,14 @@
 //!         self.0.len() as u64
 //!     }
 //!
-//!     async fn read_at(&mut self, offset: u64, buf: &mut [u8; 512]) -> Result<(), Error> {
-//!         let start = usize::try_from(offset).map_err(|_| Error::Device)?;
+//!     async fn read_block(&mut self, lba: u32, buf: &mut [u8; 512]) -> Result<(), Error> {
+//!         let start = lba as usize * 512;
 //!         buf.copy_from_slice(self.0.get(start..start + 512).ok_or(Error::Device)?);
 //!         Ok(())
 //!     }
 //!
-//!     async fn write_at(&mut self, offset: u64, buf: &[u8; 512]) -> Result<(), Error> {
-//!         let start = usize::try_from(offset).map_err(|_| Error::Device)?;
+//!     async fn write_block(&mut self, lba: u32, buf: &[u8; 512]) -> Result<(), Error> {
+//!         let start = lba as usize * 512;
 //!         self.0.get_mut(start..start + 512).ok_or(Error::Device)?.copy_from_slice(buf);
 //!         Ok(())
 //!     }
@@ -158,8 +162,8 @@
 //! async fn read_mbr(dev: &mut Device) -> Result<MBR, Error> {
 //!     let mut reader = MBR::reader(512, dev.size());
 //!     let mut buf = [0; 512];
-//!     while let Some(offset) = reader.next_offset()? {
-//!         dev.read_at(offset, &mut buf).await?;
+//!     while let Some(lba) = reader.next_lba()? {
+//!         dev.read_block(lba, &mut buf).await?;
 //!         reader.feed(&buf)?;
 //!     }
 //!     Ok(reader.finish()?)
@@ -167,7 +171,7 @@
 //!
 //! async fn write_mbr(dev: &mut Device, mbr: &mut MBR) -> Result<(), Error> {
 //!     for chunk in mbr.chunks()? {
-//!         dev.write_at(chunk.offset, &chunk.data).await?;
+//!         dev.write_block(chunk.lba, &chunk.data).await?;
 //!     }
 //!     Ok(())
 //! }
@@ -737,7 +741,7 @@ impl MBR {
     }
 
     /// Validate the MBR and the EBRs of the logical partitions, then return the boot records
-    /// to write to the disk, each with its byte offset: the MBR first, then the EBRs. This
+    /// to write to the disk, each with its LBA: the MBR first, then the EBRs. This
     /// function will update the CHS address of the partitions automatically if a valid
     /// geometry has been set. See `check_geometry`.
     ///
@@ -753,7 +757,7 @@ impl MBR {
     ///
     /// // actually write:
     /// for chunk in mbr.chunks().expect("invalid partition table") {
-    ///     let start = chunk.offset as usize;
+    ///     let start = chunk.lba as usize * 512;
     ///     disk[start..start + 512].copy_from_slice(&chunk.data);
     /// }
     /// # }
@@ -1263,7 +1267,8 @@ impl MBR {
         R: Read + Seek + ?Sized,
     {
         let mut mbr = MBR::reader(sector_size, disk_size(reader)?);
-        while let Some(offset) = mbr.next_offset()? {
+        while let Some(lba) = mbr.next_lba()? {
+            let offset = u64::from(lba) * u64::from(sector_size);
             mbr.feed(&read_boot_record(reader, offset)?)?;
         }
         mbr.finish()
@@ -1304,8 +1309,9 @@ impl MBR {
     where
         W: Write + Seek + ?Sized,
     {
+        let sector_size = u64::from(self.sector_size);
         for chunk in self.chunks()? {
-            write_boot_record(writer, chunk.offset, &chunk.data)?;
+            write_boot_record(writer, u64::from(chunk.lba) * sector_size, &chunk.data)?;
         }
         Ok(())
     }
@@ -1445,24 +1451,23 @@ impl MBRHeader {
     /// Basic usage:
     /// ```
     /// let disk: &[u8] = include_bytes!("../tests/fixtures/disk2.img");
-    /// let sector = |offset: u64| -> &[u8; 512] {
-    ///     let start = offset as usize;
+    /// let sector = |lba: u32| -> &[u8; 512] {
+    ///     let start = lba as usize * 512;
     ///     disk[start..start + 512].try_into().unwrap()
     /// };
     ///
     /// let header = mbrman::MBRHeader::from_bytes(sector(0))
     ///     .expect("could not read the MBR header");
-    /// let mut walk = header.ebr_walk(512);
-    /// while let Some(offset) = walk.next_offset().expect("invalid EBR chain") {
-    ///     if let Some(l) = walk.feed(sector(offset)).expect("could not read an EBR") {
+    /// let mut walk = header.ebr_walk();
+    /// while let Some(lba) = walk.next_lba().expect("invalid EBR chain") {
+    ///     if let Some(l) = walk.feed(sector(lba)).expect("could not read an EBR") {
     ///         println!("logical partition: starting lba = {}", l.partition.starting_lba);
     ///     }
     /// }
     /// ```
-    pub fn ebr_walk(&self, sector_size: u32) -> EBRWalk {
+    pub fn ebr_walk(&self) -> EBRWalk {
         let extended = self.get_extended_partition().cloned();
         EBRWalk {
-            sector_size,
             ebr_first_chs: extended.as_ref().map_or_else(CHS::empty, |x| x.first_chs),
             extended,
             failed: false,
@@ -1770,13 +1775,12 @@ impl LogicalPartition {
 /// A walk through the EBR chain of an extended partition, one logical partition at a time,
 /// that does no I/O: it asks for each EBR to read and you feed it the 512 bytes you read.
 ///
-/// Call `next_offset` to get the byte offset of the next EBR, read the 512 bytes there and give
-/// them to `feed`, until `next_offset` returns `None`. The walk is over after the first error.
+/// Call `next_lba` to get the LBA of the next EBR, read the first 512 bytes of that sector and
+/// give them to `feed`, until `next_lba` returns `None`. The walk is over after the first error.
 ///
 /// Created by [`MBRHeader::ebr_walk`], which has an example.
 #[derive(Debug, Clone)]
 pub struct EBRWalk {
-    sector_size: u32,
     /// The extended partition, `None` once the walk is over.
     extended: Option<MBRPartitionEntry>,
     /// The walk ended on an error.
@@ -1788,22 +1792,17 @@ pub struct EBRWalk {
 }
 
 impl EBRWalk {
-    /// Return the byte offset of the next EBR to read, or `None` when the walk is over.
+    /// Return the LBA of the next EBR to read, or `None` when the walk is over.
     ///
     /// Return `Error::InconsistentEBR` if the EBR the chain links to cannot be addressed.
-    pub fn next_offset(&self) -> Result<Option<u64>> {
+    pub fn next_lba(&self) -> Result<Option<u32>> {
         match &self.extended {
-            Some(extended) => {
-                let absolute_ebr_lba = self.absolute_ebr_lba(extended)?;
-                Ok(Some(
-                    u64::from(absolute_ebr_lba) * u64::from(self.sector_size),
-                ))
-            }
+            Some(extended) => self.absolute_ebr_lba(extended).map(Some),
             None => Ok(None),
         }
     }
 
-    /// Decode the 512 bytes read at the offset `next_offset` returned. Return the logical
+    /// Decode the 512 bytes read at the LBA `next_lba` returned. Return the logical
     /// partition of that EBR, or `None` if the extended partition is empty.
     ///
     /// Return `Error::OutOfSequence` if the walk is already over.
@@ -1890,9 +1889,9 @@ impl EBRWalk {
 /// A read of an MBR and its EBRs that does no I/O: it asks for each boot record to read and you
 /// feed it the 512 bytes you read.
 ///
-/// Call `next_offset` to get the byte offset of the next boot record, read the 512 bytes there
-/// and give them to `feed`, until `next_offset` returns `None`. Then `finish` returns the `MBR`.
-/// The MBR comes first, at offset 0, then the EBRs.
+/// Call `next_lba` to get the LBA of the next boot record, read the first 512 bytes of that
+/// sector and give them to `feed`, until `next_lba` returns `None`. Then `finish` returns the
+/// `MBR`. The MBR comes first, at LBA 0, then the EBRs.
 ///
 /// Created by [`MBR::reader`].
 ///
@@ -1902,8 +1901,8 @@ impl EBRWalk {
 /// let disk: &[u8] = include_bytes!("../tests/fixtures/disk2.img");
 ///
 /// let mut reader = mbrman::MBR::reader(512, disk.len() as u64);
-/// while let Some(offset) = reader.next_offset().expect("invalid EBR chain") {
-///     let start = offset as usize;
+/// while let Some(lba) = reader.next_lba().expect("invalid EBR chain") {
+///     let start = lba as usize * 512;
 ///     reader
 ///         .feed(disk[start..start + 512].try_into().unwrap())
 ///         .expect("could not read a boot record");
@@ -1924,20 +1923,20 @@ pub struct MBRReader {
 
 #[cfg(feature = "alloc")]
 impl MBRReader {
-    /// Return the byte offset of the next boot record to read, or `None` when the whole
+    /// Return the LBA of the next boot record to read, or `None` when the whole
     /// partition table has been read. `None` is also returned after `feed` failed on an EBR:
-    /// the reader then asks for nothing more. After `feed` failed on the MBR, it asks for offset
-    /// 0 again. In both cases `finish` returns `Error::OutOfSequence`.
+    /// the reader then asks for nothing more. After `feed` failed on the MBR, it asks for LBA 0
+    /// again. In both cases `finish` returns `Error::OutOfSequence`.
     ///
     /// Return `Error::InconsistentEBR` if the EBR the chain links to cannot be addressed.
-    pub fn next_offset(&self) -> Result<Option<u64>> {
+    pub fn next_lba(&self) -> Result<Option<u32>> {
         match &self.table {
-            Some((_, walk)) => walk.next_offset(),
+            Some((_, walk)) => walk.next_lba(),
             None => Ok(Some(0)),
         }
     }
 
-    /// Decode the 512 bytes read at the offset `next_offset` returned.
+    /// Decode the 512 bytes read at the LBA `next_lba` returned.
     ///
     /// Return `Error::OutOfSequence` if the whole partition table has already been read.
     pub fn feed(&mut self, sector: &[u8; 512]) -> Result<()> {
@@ -1945,7 +1944,7 @@ impl MBRReader {
             Some((_, walk)) => self.logical_partitions.extend(walk.feed(sector)?),
             None => {
                 let header = MBRHeader::from_bytes(sector)?;
-                let walk = header.ebr_walk(self.sector_size);
+                let walk = header.ebr_walk();
                 self.table = Some((header, walk));
             }
         }
@@ -1980,8 +1979,8 @@ impl MBRReader {
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chunk {
-    /// Byte offset of the boot record on the disk
-    pub offset: u64,
+    /// LBA of the boot record on the disk, in sectors of the MBR's sector size
+    pub lba: u32,
     /// The 512 bytes of the boot record
     pub data: [u8; 512],
 }
@@ -2007,7 +2006,7 @@ impl Iterator for Chunks<'_> {
 
     fn next(&mut self) -> Option<Chunk> {
         if let Some(data) = self.header.take() {
-            return Some(Chunk { offset: 0, data });
+            return Some(Chunk { lba: 0, data });
         }
         let extended = self.extended.as_ref()?;
         let l = self.mbr.logical_partitions.get(self.next)?;
@@ -2017,7 +2016,7 @@ impl Iterator for Chunks<'_> {
             .expect("the EBRs are validated by MBR::chunks");
         self.next += 1;
         Some(Chunk {
-            offset: u64::from(l.absolute_ebr_lba) * u64::from(self.mbr.sector_size),
+            lba: l.absolute_ebr_lba,
             data: ebr.to_bytes(),
         })
     }
@@ -2194,9 +2193,9 @@ mod core_tests {
 
     const DISK2: &[u8] = include_bytes!("../tests/fixtures/disk2.img");
 
-    /// The boot record at byte `offset` of `disk`.
-    fn sector(disk: &[u8], offset: u64) -> &[u8; BOOT_RECORD_SIZE] {
-        let start = usize::try_from(offset).unwrap();
+    /// The boot record at the start of sector `lba` of `disk`.
+    fn sector(disk: &[u8], lba: u32) -> &[u8; BOOT_RECORD_SIZE] {
+        let start = lba as usize * BOOT_RECORD_SIZE;
         disk[start..start + BOOT_RECORD_SIZE].try_into().unwrap()
     }
 
@@ -2211,23 +2210,23 @@ mod core_tests {
             (16, Some(2)),
         ];
 
-        let mut walk = header.ebr_walk(512);
+        let mut walk = header.ebr_walk();
         for (absolute_ebr_lba, ebr_sectors) in expected {
-            let offset = walk.next_offset().unwrap().unwrap();
-            assert_eq!(offset, u64::from(absolute_ebr_lba) * 512);
-            let l = walk.feed(sector(DISK2, offset)).unwrap().unwrap();
+            let lba = walk.next_lba().unwrap().unwrap();
+            assert_eq!(lba, absolute_ebr_lba);
+            let l = walk.feed(sector(DISK2, lba)).unwrap().unwrap();
             assert_eq!(l.absolute_ebr_lba, absolute_ebr_lba);
             assert_eq!(l.ebr_sectors, ebr_sectors);
             assert_eq!(l.partition.sys, 0x83);
         }
-        assert_eq!(walk.next_offset().unwrap(), None);
+        assert_eq!(walk.next_lba().unwrap(), None);
     }
 
     #[test]
     fn ebr_walk_without_extended_partition() {
         let header = MBRHeader::new([0xff; 4]);
-        let mut walk = header.ebr_walk(512);
-        assert_eq!(walk.next_offset().unwrap(), None);
+        let mut walk = header.ebr_walk();
+        assert_eq!(walk.next_lba().unwrap(), None);
         assert!(matches!(
             walk.feed(sector(DISK2, 0)),
             Err(Error::OutOfSequence)
@@ -2242,13 +2241,13 @@ mod core_tests {
         data[5 * 512 + 510..6 * 512].fill(0);
 
         let header = MBRHeader::from_bytes(sector(&data, 0)).unwrap();
-        let mut walk = header.ebr_walk(512);
-        assert_eq!(walk.next_offset().unwrap(), Some(5 * 512));
-        assert!(walk.feed(sector(&data, 5 * 512)).unwrap().is_none());
+        let mut walk = header.ebr_walk();
+        assert_eq!(walk.next_lba().unwrap(), Some(5));
+        assert!(walk.feed(sector(&data, 5)).unwrap().is_none());
         // a finished walk asks for nothing more
-        assert_eq!(walk.next_offset().unwrap(), None);
+        assert_eq!(walk.next_lba().unwrap(), None);
         assert!(matches!(
-            walk.feed(sector(&data, 5 * 512)),
+            walk.feed(sector(&data, 5)),
             Err(Error::OutOfSequence)
         ));
     }
@@ -2262,16 +2261,16 @@ mod core_tests {
         data[link..link + 4].copy_from_slice(&1_u32.to_le_bytes());
 
         let header = MBRHeader::from_bytes(sector(&data, 0)).unwrap();
-        let mut walk = header.ebr_walk(512);
-        let l = walk.feed(sector(&data, 5 * 512)).unwrap().unwrap();
+        let mut walk = header.ebr_walk();
+        let l = walk.feed(sector(&data, 5)).unwrap().unwrap();
         assert_eq!(l.absolute_ebr_lba, 5);
-        assert_eq!(walk.next_offset().unwrap(), Some(7 * 512));
+        assert_eq!(walk.next_lba().unwrap(), Some(7));
         assert!(matches!(
-            walk.feed(sector(&data, 7 * 512)),
+            walk.feed(sector(&data, 7)),
             Err(Error::InconsistentEBR)
         ));
         // the walk is over after an error
-        assert_eq!(walk.next_offset().unwrap(), None);
+        assert_eq!(walk.next_lba().unwrap(), None);
     }
 
     #[test]
@@ -2290,15 +2289,12 @@ mod core_tests {
         ebr[462 + 8..462 + 12].copy_from_slice(&5_u32.to_le_bytes());
         ebr[510..].copy_from_slice(&BOOT_SIGNATURE);
 
-        let mut walk = header.ebr_walk(512);
-        assert_eq!(
-            walk.next_offset().unwrap(),
-            Some(u64::from(u32::MAX - 1) * 512)
-        );
+        let mut walk = header.ebr_walk();
+        assert_eq!(walk.next_lba().unwrap(), Some(u32::MAX - 1));
         assert!(walk.feed(&ebr).unwrap().is_some());
-        assert!(matches!(walk.next_offset(), Err(Error::InconsistentEBR)));
+        assert!(matches!(walk.next_lba(), Err(Error::InconsistentEBR)));
         assert!(matches!(walk.feed(&ebr), Err(Error::InconsistentEBR)));
-        assert_eq!(walk.next_offset().unwrap(), None);
+        assert_eq!(walk.next_lba().unwrap(), None);
     }
 
     #[cfg(feature = "alloc")]
@@ -2306,8 +2302,8 @@ mod core_tests {
     fn mbr_reader_of_disk2() {
         let mut reader = MBR::reader(512, DISK2.len() as u64);
         let mut reads = 0;
-        while let Some(offset) = reader.next_offset().unwrap() {
-            reader.feed(sector(DISK2, offset)).unwrap();
+        while let Some(lba) = reader.next_lba().unwrap() {
+            reader.feed(sector(DISK2, lba)).unwrap();
             reads += 1;
         }
         // the MBR and 5 EBRs
@@ -2332,8 +2328,8 @@ mod core_tests {
 
         // fed after the whole table is read
         let mut reader = MBR::reader(512, DISK2.len() as u64);
-        while let Some(offset) = reader.next_offset().unwrap() {
-            reader.feed(sector(DISK2, offset)).unwrap();
+        while let Some(lba) = reader.next_lba().unwrap() {
+            reader.feed(sector(DISK2, lba)).unwrap();
         }
         assert!(matches!(
             reader.feed(sector(DISK2, 0)),
@@ -2344,7 +2340,7 @@ mod core_tests {
         // a failed MBR feed asks for the MBR again
         let mut reader = MBR::reader(512, DISK2.len() as u64);
         assert!(reader.feed(&[0; 512]).is_err());
-        assert_eq!(reader.next_offset().unwrap(), Some(0));
+        assert_eq!(reader.next_lba().unwrap(), Some(0));
         assert!(matches!(reader.finish(), Err(Error::OutOfSequence)));
     }
 
@@ -2359,14 +2355,14 @@ mod core_tests {
 
         let mut reader = MBR::reader(512, data.len() as u64);
         let err = loop {
-            let offset = reader.next_offset().unwrap().unwrap();
-            if let Err(err) = reader.feed(sector(&data, offset)) {
+            let lba = reader.next_lba().unwrap().unwrap();
+            if let Err(err) = reader.feed(sector(&data, lba)) {
                 break err;
             }
         };
         assert!(matches!(err, Error::InconsistentEBR));
         // a caller that goes on anyway asks for nothing more, and finish reports the misuse
-        assert_eq!(reader.next_offset().unwrap(), None);
+        assert_eq!(reader.next_lba().unwrap(), None);
         assert!(matches!(reader.finish(), Err(Error::OutOfSequence)));
     }
 
@@ -2403,20 +2399,20 @@ mod core_tests {
         mbr.push(0x07, 12, 10).unwrap();
 
         let mut disk = [0; 64 * 512];
-        let mut offsets = [0; 3];
+        let mut lbas = [0; 3];
         let mut chunks = mbr.chunks().unwrap();
-        for (chunk, offset) in chunks.by_ref().zip(&mut offsets) {
-            let start = usize::try_from(chunk.offset).unwrap();
+        for (chunk, lba) in chunks.by_ref().zip(&mut lbas) {
+            let start = chunk.lba as usize * BOOT_RECORD_SIZE;
             disk[start..start + BOOT_RECORD_SIZE].copy_from_slice(&chunk.data);
-            *offset = chunk.offset;
+            *lba = chunk.lba;
         }
         assert!(chunks.next().is_none());
         // the MBR first, then each EBR
-        assert_eq!(offsets, [0, 512, 12 * 512]);
+        assert_eq!(lbas, [0, 1, 12]);
 
         let mut reader = MBR::reader(512, disk.len() as u64);
-        while let Some(offset) = reader.next_offset().unwrap() {
-            reader.feed(sector(&disk, offset)).unwrap();
+        while let Some(lba) = reader.next_lba().unwrap() {
+            reader.feed(sector(&disk, lba)).unwrap();
         }
         let read = reader.finish().unwrap();
         assert_eq!(read.header, mbr.header);
@@ -3074,7 +3070,7 @@ mod tests {
         let mut chunked = mbr.clone();
         let mut disk = vec![0; 64 * ss as usize];
         for chunk in chunked.chunks().unwrap() {
-            let start = usize::try_from(chunk.offset).unwrap();
+            let start = chunk.lba as usize * ss as usize;
             disk[start..start + 512].copy_from_slice(&chunk.data);
         }
         mbr.write_into(&mut cur).unwrap();

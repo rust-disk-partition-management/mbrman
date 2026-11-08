@@ -21,7 +21,7 @@ Added:
 
 - `no_std` and async support, with no I/O trait to implement: mbrman decodes and encodes boot records and the caller does the I/O. The `MBR` type needs the `alloc` feature (#41)
 - `MBR::new` and `MBR::reader`, which take the disk size in bytes, and `MBRReader`, which asks for each boot record to read and builds the `MBR` (#41)
-- `MBR::chunks`, which validates the partition table and returns each boot record to write with its byte offset (#41)
+- `MBR::chunks`, which validates the partition table and returns each boot record to write with its LBA (#41)
 - `MBRHeader::ebr_walk`, which walks the EBR chain one logical partition at a time, without allocating (#41)
 - `Error::OutOfSequence`, returned when a reader is fed or finished out of sequence (#41)
 - `MBRHeader::from_bytes`/`to_bytes` to decode and encode a 512-byte MBR sector, with validation (#40)
