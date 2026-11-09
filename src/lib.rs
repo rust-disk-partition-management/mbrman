@@ -647,8 +647,7 @@ impl MBR {
     pub fn find_last_place(&self, size: u32) -> Option<u32> {
         self.find_free_sectors()
             .iter()
-            .filter(|(_, l)| *l >= size)
-            .last()
+            .rfind(|(_, l)| *l >= size)
             .map(|(i, l)| (i + l - size) / self.align * self.align)
     }
 
