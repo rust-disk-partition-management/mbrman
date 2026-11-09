@@ -57,3 +57,43 @@ jobs:
 
       - run: cargo clippy --all --tests --all-features -- -D warnings
         if: github.event_name == 'pull_request' && matrix.lint
+
+  no_std:
+    strategy:
+      fail-fast: false
+      matrix:
+        rust:
+          - stable
+          - msrv
+        features:
+          - ""
+          - alloc
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v3
+
+      - name: Install toolchain
+        shell: bash
+        run: |
+          ver="${{ matrix.rust }}"
+          if [ "$ver" = msrv ]; then
+              ver=$(cargo metadata --format-version 1 --no-deps | \
+                  jq -r 'first(.packages[] | select(.rust_version != null).rust_version)')
+              extra=(-c clippy)
+          fi
+          rustup toolchain install "$ver" --profile minimal --no-self-update \
+              -t thumbv7em-none-eabihf "${extra[@]}"
+          rustup default "$ver"
+          echo "Installed:"
+          cargo --version
+          rustc --version --verbose
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo build --target thumbv7em-none-eabihf --no-default-features --features "${{ matrix.features }}"
+
+      - run: cargo test --no-default-features --features "${{ matrix.features }}"
+
+      - run: cargo clippy --tests --no-default-features --features "${{ matrix.features }}" -- -D warnings
+        if: github.event_name == 'pull_request' && matrix.rust == 'msrv'

@@ -1,183 +1,35 @@
-//! A library for reading and managing MBR partition tables.
-//!
-//! ## Features
-//!
-//! - Create and delete primary partitions and logical volumes
-//! - Generate the EBR of a logical volume automatically, or provide it manually
-//! - Compute the CHS addresses of logical partitions automatically when writing
-//!   to disk, if the disk geometry is set
-//!
-//! ## Examples
-//!
-//! ### Read the partitions of a disk
-//!
-//! Open a disk image, read its MBR and list the partitions in use.
-//!
-//! ```rust
-//! let mut f = std::fs::File::open("tests/fixtures/disk1.img")
-//!     .expect("could not open disk");
-//! let mbr = mbrman::MBR::read_from(&mut f, 512)
-//!     .expect("could not find MBR");
-//!
-//! println!("Disk signature: {:?}", mbr.header.disk_signature);
-//!
-//! for (i, p) in mbr.iter() {
-//!     // NOTE: The first four partitions are always provided by iter()
-//!     if p.is_used() {
-//!         println!("Partition #{}: type = {:?}, size = {} bytes, starting lba = {}",
-//!             i,
-//!             p.sys,
-//!             p.sectors * mbr.sector_size,
-//!             p.starting_lba);
-//!     }
-//! }
-//! ```
-//!
-//! ### Create and delete a primary partition
-//!
-//! Find a free slot and free space, fill the slot with a new partition, then empty it again.
-//!
-//! ```rust
-//! let mut f = std::fs::File::open("tests/fixtures/disk1.img")
-//!     .expect("could not open disk");
-//! let mut mbr = mbrman::MBR::read_from(&mut f, 512)
-//!     .expect("could not find MBR");
-//!
-//! let free_partition_number = mbr.iter().find(|(i, p)| p.is_unused()).map(|(i, _)| i)
-//!     .expect("no more places available");
-//! let sectors = mbr.get_maximum_partition_size()
-//!     .expect("no more space available");
-//! let starting_lba = mbr.find_optimal_place(sectors)
-//!     .expect("could not find a place to put the partition");
-//!
-//! mbr[free_partition_number] = mbrman::MBRPartitionEntry {
-//!     boot: mbrman::BOOT_INACTIVE,        // boot flag
-//!     first_chs: mbrman::CHS::empty(),    // first CHS address (only useful for old computers)
-//!     sys: 0x83,                          // Linux filesystem
-//!     last_chs: mbrman::CHS::empty(),     // last CHS address (only useful for old computers)
-//!     starting_lba,                       // the sector where the partition starts
-//!     sectors,                            // the number of sectors in that partition
-//! };
-//!
-//! mbr[free_partition_number] = mbrman::MBRPartitionEntry::empty();
-//!
-//! // NOTE: nothing is written to the disk until you call mbr.write_into()
-//! ```
-//!
-//! ### Create a new partition table on an empty disk
-//!
-//! Write a fresh MBR to a blank in-memory disk.
-//!
-//! ```rust
-//! let ss = 512; // sector size
-//! let data = vec![0; 100 * ss as usize];
-//! let mut cur = std::io::Cursor::new(data);
-//!
-//! let mut mbr = mbrman::MBR::new_from(&mut cur, ss as u32, [0xff; 4])
-//!     .expect("could not create partition table");
-//!
-//! // NOTE: write the changes to the in-memory buffer
-//! mbr.write_into(&mut cur);
-//! ```
-//!
-//! ### Add a logical volume
-//!
-//! A logical volume lives inside an extended partition, so create one first. `push` then places the volume and its EBR for you.
-//!
-//! ```rust
-//! let ss = 512; // sector size
-//! let data = vec![0; 100 * ss as usize];
-//! let mut cur = std::io::Cursor::new(data);
-//!
-//! let mut mbr = mbrman::MBR::new_from(&mut cur, ss as u32, [0xff; 4])
-//!     .expect("could not create partition table");
-//!
-//! mbr[1] = mbrman::MBRPartitionEntry {
-//!     boot: mbrman::BOOT_INACTIVE,        // boot flag
-//!     first_chs: mbrman::CHS::empty(),    // first CHS address (only useful for old computers)
-//!     sys: 0x0f,                          // extended partition with LBA
-//!     last_chs: mbrman::CHS::empty(),     // last CHS address (only useful for old computers)
-//!     starting_lba: 1,                    // the sector where the partition starts
-//!     sectors: mbr.disk_size - 1,         // the number of sectors in that partition
-//! };
-//!
-//! // align on sectors, so the EBR only takes the first sector of the extended partition
-//! mbr.align = 1;
-//!
-//! // this helper does the hard work for you: here it creates a Linux filesystem
-//! // logical volume that fills the entire extended partition
-//! // NOTE: 1 sector is lost because the EBR uses it
-//! mbr.push(0x83, 1, mbr.disk_size - 1)
-//!     .expect("could not add the logical volume");
-//!
-//! // NOTE: write the changes to the in-memory buffer
-//! mbr.write_into(&mut cur);
-//! ```
-//!
-//! ### Add a logical volume manually
-//!
-//! Use this only if you need to choose exactly where the EBR and the partition go.
-//!
-//! ```rust
-//! let ss = 512; // sector size
-//! let data = vec![0; 100 * ss as usize];
-//! let mut cur = std::io::Cursor::new(data);
-//!
-//! let mut mbr = mbrman::MBR::new_from(&mut cur, ss as u32, [0xff; 4])
-//!     .expect("could not create partition table");
-//!
-//! mbr[1] = mbrman::MBRPartitionEntry {
-//!     boot: mbrman::BOOT_INACTIVE,        // boot flag
-//!     first_chs: mbrman::CHS::empty(),    // first CHS address (only useful for old computers)
-//!     sys: 0x0f,                          // extended partition with LBA
-//!     last_chs: mbrman::CHS::empty(),     // last CHS address (only useful for old computers)
-//!     starting_lba: 1,                    // the sector where the partition starts
-//!     sectors: mbr.disk_size - 1,         // the number of sectors in that partition
-//! };
-//!
-//! // NOTE: mbrman does not check that a manually created partition is consistent
-//! mbr.logical_partitions.push(
-//!     mbrman::LogicalPartition {
-//!         // this is the actual partition entry for the logical volume
-//!         partition: mbrman::MBRPartitionEntry {
-//!             boot: mbrman::BOOT_INACTIVE,
-//!             first_chs: mbrman::CHS::empty(),
-//!             sys: 0x83,
-//!             last_chs: mbrman::CHS::empty(),
-//!             starting_lba: 2,                    // the sector index 1 is used by the EBR
-//!             sectors: mbr.disk_size - 2,
-//!         },
-//!         // this is the absolute LBA address of the EBR
-//!         absolute_ebr_lba: 1,
-//!         // the number of sectors in the first EBR is never known
-//!         ebr_sectors: None,
-//!         // empty boot sector in the EBR
-//!         bootstrap_code: [0; 446],
-//!         // this is the absolute CHS address of the EBR (only used by old computers)
-//!         ebr_first_chs: mbrman::CHS::empty(),                // only for old computers
-//!         // this is the absolute CHS address of the last EBR (only used by old computers)
-//!         // NOTE: this is never known for the first EBR
-//!         ebr_last_chs: None,
-//!     }
-//! );
-//!
-//! // NOTE: write the changes to the in-memory buffer
-//! mbr.write_into(&mut cur);
-//! ```
-
+#![cfg_attr(feature = "std", doc = include_str!("../README.md"))]
+#![cfg_attr(
+    not(feature = "std"),
+    doc = "A library for reading and managing MBR partition tables.\n\n\
+           Without the `std` feature, this page does not include the README: see \
+           <https://docs.rs/mbrman> for the full documentation, including how to do the I/O \
+           yourself and how to use the reader and writer in async code."
+)]
+#![no_std]
 #![deny(missing_docs)]
 
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::iter::once;
-use std::ops::{Index, IndexMut};
-use thiserror::Error;
+#[cfg(feature = "alloc")]
+extern crate alloc;
+#[cfg(feature = "std")]
+extern crate std;
 
+#[cfg(feature = "alloc")]
+use alloc::{vec, vec::Vec};
+use core::fmt;
+#[cfg(feature = "alloc")]
+use core::iter::FusedIterator;
+use core::ops::{Index, IndexMut};
+#[cfg(feature = "std")]
+use std::io::{Read, Seek, SeekFrom, Write};
+
+#[cfg(feature = "alloc")]
 const DEFAULT_ALIGN: u32 = 2048;
+#[cfg(feature = "alloc")]
 const MAX_ALIGN: u32 = 16384;
+#[cfg(feature = "alloc")]
 const FIRST_USABLE_LBA: u32 = 1;
 const BOOT_SIGNATURE: [u8; 2] = [0x55, 0xaa];
-/// Size in bytes of an MBR or EBR sector on disk.
-const BOOT_RECORD_SIZE: usize = 512;
 
 /// Boot flag for a bootable partition
 pub const BOOT_ACTIVE: u8 = 0x80;
@@ -185,22 +37,51 @@ pub const BOOT_ACTIVE: u8 = 0x80;
 pub const BOOT_INACTIVE: u8 = 0x00;
 
 /// The result of reading, writing or managing a MBR.
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = core::result::Result<T, Error>;
 
-/// Read exactly one boot record (MBR or EBR sector).
-fn read_boot_record<R: Read + ?Sized>(reader: &mut R) -> Result<[u8; BOOT_RECORD_SIZE]> {
-    let mut buf = [0; BOOT_RECORD_SIZE];
+/// Read exactly one boot record (MBR or EBR sector) at byte `offset`.
+#[cfg(feature = "std")]
+fn read_boot_record<R: Read + Seek + ?Sized>(reader: &mut R, offset: u64) -> Result<[u8; 512]> {
+    let mut buf = [0; 512];
+    reader.seek(SeekFrom::Start(offset))?;
     reader.read_exact(&mut buf)?;
     Ok(buf)
 }
 
-/// Copy `N` bytes starting at `offset` into an array.
-fn chunk<const N: usize>(bytes: &[u8], offset: usize) -> [u8; N] {
-    bytes[offset..offset + N].try_into().unwrap()
+/// Write exactly one boot record (MBR or EBR sector) at byte `offset`.
+#[cfg(feature = "std")]
+fn write_boot_record<W: Write + Seek + ?Sized>(
+    writer: &mut W,
+    offset: u64,
+    data: &[u8; 512],
+) -> Result<()> {
+    writer.seek(SeekFrom::Start(offset))?;
+    writer.write_all(data)?;
+    Ok(())
+}
+
+/// Convert a disk size in bytes to sectors, saturating at `u32::MAX`.
+///
+/// # Panics
+/// The sector size must be at least 512 bytes: a boot record is 512 bytes and does not fit
+/// in a smaller sector.
+#[cfg(feature = "alloc")]
+fn disk_size_in_sectors(disk_size: u64, sector_size: u32) -> u32 {
+    check_sector_size(sector_size);
+    u32::try_from(disk_size / u64::from(sector_size)).unwrap_or(u32::MAX)
+}
+
+/// Check that a boot record (512 bytes) fits in one sector of this size.
+#[cfg(feature = "alloc")]
+fn check_sector_size(sector_size: u32) {
+    assert!(
+        sector_size >= 512,
+        "the sector size must be at least 512 bytes, got {sector_size}"
+    );
 }
 
 /// An error
-#[derive(Debug, Error)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
     /// The CHS address requested cannot be represented in CHS
@@ -208,44 +89,78 @@ pub enum Error {
     /// # Remark
     ///
     /// There is a hard limit around 8GB for CHS addressing.
-    #[error("exceeded the maximum limit of CHS")]
     LBAExceedsMaximumCHS,
     /// The CHS address requested exceeds the number of cylinders in the disk
-    #[error("exceeded the maximum number of cylinders on disk")]
     LBAExceedsMaximumCylinders,
     /// I/O errors.
-    #[error("generic I/O error")]
-    Io(#[from] std::io::Error),
+    #[cfg(feature = "std")]
+    Io(std::io::Error),
     /// Inconsistent extended boot record
-    #[error("inconsistent extended boot record")]
     InconsistentEBR,
     /// No extended partition
-    #[error("no extended partition")]
     NoExtendedPartition,
     /// The EBR starts before the extended partition
-    #[error("EBR starts before the extended partition")]
     EBRStartsBeforeExtendedPartition,
     /// The EBR starts too close to the extended partition
-    #[error("EBR starts too close to the end of the extended partition")]
     EBRStartsTooCloseToTheEndOfExtendedPartition,
     /// The EBR ends after the extended partition
-    #[error("EBR ends after the extended partition")]
     EBREndsAfterExtendedPartition,
     /// Not enough sectors to create a logical partition
-    #[error("not enough sectors to create a logical partition")]
     NotEnoughSectorsToCreateLogicalPartition,
     /// An operation that required to find a partition, was unable to find that partition.
-    #[error("partition not found")]
     PartitionNotFound,
     /// An error that occurs when there is not enough space left on the table to continue.
-    #[error("no space left")]
     NoSpaceLeft,
     /// MBR doesn't have the expected signature value
-    #[error("invalid MBR signature")]
     InvalidSignature,
     /// Partition has invalid boot flag
-    #[error("partition has invalid boot flag")]
     InvalidBootFlag,
+    /// A boot record was fed to a reader that expected none, or a reader was finished before
+    /// it read the whole partition table
+    OutOfSequence,
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Error::LBAExceedsMaximumCHS => "exceeded the maximum limit of CHS",
+            Error::LBAExceedsMaximumCylinders => "exceeded the maximum number of cylinders on disk",
+            #[cfg(feature = "std")]
+            Error::Io(_) => "generic I/O error",
+            Error::InconsistentEBR => "inconsistent extended boot record",
+            Error::NoExtendedPartition => "no extended partition",
+            Error::EBRStartsBeforeExtendedPartition => "EBR starts before the extended partition",
+            Error::EBRStartsTooCloseToTheEndOfExtendedPartition => {
+                "EBR starts too close to the end of the extended partition"
+            }
+            Error::EBREndsAfterExtendedPartition => "EBR ends after the extended partition",
+            Error::NotEnoughSectorsToCreateLogicalPartition => {
+                "not enough sectors to create a logical partition"
+            }
+            Error::PartitionNotFound => "partition not found",
+            Error::NoSpaceLeft => "no space left",
+            Error::InvalidSignature => "invalid MBR signature",
+            Error::InvalidBootFlag => "partition has invalid boot flag",
+            Error::OutOfSequence => "boot record fed out of sequence or read not finished",
+        })
+    }
+}
+
+impl core::error::Error for Error {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            #[cfg(feature = "std")]
+            Error::Io(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl From<std::io::Error> for Error {
+    fn from(err: std::io::Error) -> Error {
+        Error::Io(err)
+    }
 }
 
 /// A type representing a MBR partition table including its partition, the sector size of the disk
@@ -254,6 +169,7 @@ pub enum Error {
 /// # Examples:
 /// Read an existing MBR on a reader and list its partitions:
 /// ```
+/// # #[cfg(feature = "std")] {
 /// let mut f = std::fs::File::open("tests/fixtures/disk1.img")
 ///     .expect("could not open disk");
 /// let mbr = mbrman::MBR::read_from(&mut f, 512)
@@ -270,13 +186,20 @@ pub enum Error {
 ///             p.starting_lba);
 ///     }
 /// }
+/// # }
 /// ```
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MBR {
-    /// Sector size of the disk.
+    /// Sector size of the disk, in bytes.
     ///
     /// You should not change this, otherwise the starting locations of your partitions will be
     /// different in bytes.
+    ///
+    /// # Panics
+    /// The value must be at least 512, the size of a boot record: `MBR::new`, `MBR::reader`,
+    /// `MBR::new_from`, `MBR::read_from`, `MBR::update_from` and `MBR::write_into` panic
+    /// otherwise.
     pub sector_size: u32,
     /// MBR partition header (disk GUID, first/last usable LBA, etc...)
     pub header: MBRHeader,
@@ -301,6 +224,7 @@ pub struct MBR {
     pub disk_size: u32,
 }
 
+#[cfg(feature = "alloc")]
 impl MBR {
     /// Get an iterator over the partition entries and their index. The
     /// index always starts at 1.
@@ -317,14 +241,13 @@ impl MBR {
     /// Get a mutable iterator over the partition entries and their
     /// index. The index always starts at 1.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (usize, &mut MBRPartitionEntry)> {
-        let mut partitions: Vec<_> = vec![
-            &mut self.header.partition_1,
-            &mut self.header.partition_2,
-            &mut self.header.partition_3,
-            &mut self.header.partition_4,
-        ];
-        partitions.extend(self.logical_partitions.iter_mut().map(|x| &mut x.partition));
-        partitions.into_iter().enumerate().map(|(i, x)| (i + 1, x))
+        self.header.iter_mut().chain(
+            self.logical_partitions
+                .iter_mut()
+                .map(|x| &mut x.partition)
+                .enumerate()
+                .map(|(i, x)| (i + 5, x)),
+        )
     }
 
     /// Get `Some(&MBRPartitionEntry)` if it exists, None otherwise.
@@ -378,137 +301,48 @@ impl MBR {
         false
     }
 
-    /// Make a new MBR
+    /// Make a new MBR for a disk of `disk_size_bytes` bytes, without doing any I/O.
+    ///
+    /// With `std`, `MBR::new_from` reads the disk size from the disk.
+    ///
+    /// # Panics
+    /// The sector size must be at least 512, the size of a boot record.
     ///
     /// # Examples
     /// Basic usage:
     /// ```
-    /// let mut f = std::fs::File::open("tests/fixtures/disk1.img")
-    ///     .expect("could not open disk");
-    /// let mbr = mbrman::MBR::new_from(&mut f, 512, [0x01, 0x02, 0x03, 0x04])
-    ///     .expect("could not make a partition table");
+    /// # #[cfg(feature = "alloc")] {
+    /// let mbr = mbrman::MBR::new(512, 100 * 512, [0x01, 0x02, 0x03, 0x04]);
+    /// assert_eq!(mbr.disk_size, 100);
+    /// # }
     /// ```
-    pub fn new_from<S>(seeker: &mut S, sector_size: u32, disk_signature: [u8; 4]) -> Result<MBR>
-    where
-        S: Seek,
-    {
-        let disk_size = u32::try_from(seeker.seek(SeekFrom::End(0))? / u64::from(sector_size))
-            .unwrap_or(u32::MAX);
-        let header = MBRHeader::new(disk_signature);
-
-        Ok(MBR {
+    pub fn new(sector_size: u32, disk_size_bytes: u64, disk_signature: [u8; 4]) -> MBR {
+        MBR {
             sector_size,
-            header,
+            header: MBRHeader::new(disk_signature),
             logical_partitions: Vec::new(),
             align: DEFAULT_ALIGN,
             cylinders: 0,
             heads: 0,
             sectors: 0,
-            disk_size,
-        })
-    }
-
-    /// Read the MBR on a reader.
-    ///
-    /// # Examples
-    /// Basic usage:
-    /// ```
-    /// let mut f = std::fs::File::open("tests/fixtures/disk1.img")
-    ///     .expect("could not open disk");
-    /// let mbr = mbrman::MBR::read_from(&mut f, 512)
-    ///     .expect("could not read the partition table");
-    /// ```
-    pub fn read_from<R>(mut reader: &mut R, sector_size: u32) -> Result<MBR>
-    where
-        R: Read + Seek + ?Sized,
-    {
-        let disk_size = u32::try_from(reader.seek(SeekFrom::End(0))? / u64::from(sector_size))
-            .unwrap_or(u32::MAX);
-        let header = MBRHeader::read_from(&mut reader)?;
-
-        let mut logical_partitions = Vec::new();
-        if let Some(extended) = header.get_extended_partition() {
-            // NOTE: The number of sectors is an index field; thus, the zero
-            //       value is invalid, reserved and must not be used in normal
-            //       partition entries. The entry is used by operating systems
-            //       in certain circumstances; in such cases the CHS addresses
-            //       are ignored.
-            let mut relative_ebr_lba = 0;
-            let mut ebr_sectors = None;
-            let mut ebr_first_chs = extended.first_chs;
-            let mut ebr_last_chs = None;
-            loop {
-                // check the link before following it: an EBR past u32::MAX cannot be
-                // represented, so it must not be read
-                let absolute_ebr_lba = extended
-                    .starting_lba
-                    .checked_add(relative_ebr_lba)
-                    .ok_or(Error::InconsistentEBR)?;
-                reader.seek(SeekFrom::Start(
-                    u64::from(absolute_ebr_lba) * u64::from(sector_size),
-                ))?;
-                let (partition, next, bootstrap_code) = match EBRHeader::read_from(&mut reader) {
-                    Ok(ebr) => ebr.unwrap(),
-                    // NOTE: if the extended partition is empty, it is not required that an
-                    //       EBR exists
-                    Err(Error::InvalidSignature) if relative_ebr_lba == 0 => break,
-                    Err(err) => return Err(err),
-                };
-                let starting_lba = partition
-                    .starting_lba
-                    .checked_add(absolute_ebr_lba)
-                    .ok_or(Error::InconsistentEBR)?;
-                logical_partitions.push(LogicalPartition {
-                    partition: MBRPartitionEntry {
-                        starting_lba,
-                        ..partition
-                    },
-                    absolute_ebr_lba,
-                    ebr_sectors,
-                    ebr_first_chs,
-                    ebr_last_chs,
-                    bootstrap_code,
-                });
-
-                if next.starting_lba > 0 && relative_ebr_lba >= next.starting_lba {
-                    return Err(Error::InconsistentEBR);
-                }
-
-                relative_ebr_lba = next.starting_lba;
-                ebr_sectors = Some(next.sectors);
-                ebr_first_chs = next.first_chs;
-                ebr_last_chs = Some(next.last_chs);
-
-                if relative_ebr_lba == 0 {
-                    break;
-                }
-            }
+            disk_size: disk_size_in_sectors(disk_size_bytes, sector_size),
         }
-
-        let align = MBR::find_alignment(&header, &logical_partitions);
-
-        Ok(MBR {
-            sector_size,
-            header,
-            logical_partitions,
-            align,
-            cylinders: 0,
-            heads: 0,
-            sectors: 0,
-            disk_size,
-        })
     }
 
-    /// Updates the header to match the specifications of the seeker given in argument.
-    /// `disk_size` will be updated after this operation.
-    pub fn update_from<S>(&mut self, seeker: &mut S) -> Result<()>
-    where
-        S: Seek + ?Sized,
-    {
-        self.disk_size =
-            u32::try_from(seeker.seek(SeekFrom::End(0))? / u64::from(self.sector_size))
-                .unwrap_or(u32::MAX);
-        Ok(())
+    /// Start reading the MBR of a disk of `disk_size_bytes` bytes, without doing any I/O: the
+    /// returned reader asks for the boot records to read one at a time.
+    ///
+    /// With `std`, `MBR::read_from` does the I/O for you. See [`MBRReader`] for an example.
+    ///
+    /// # Panics
+    /// The sector size must be at least 512, the size of a boot record.
+    pub fn reader(sector_size: u32, disk_size_bytes: u64) -> MBRReader {
+        MBRReader {
+            sector_size,
+            disk_size: disk_size_in_sectors(disk_size_bytes, sector_size),
+            table: None,
+            logical_partitions: Vec::new(),
+        }
     }
 
     fn find_alignment(header: &MBRHeader, logical_partitions: &[LogicalPartition]) -> u32 {
@@ -518,6 +352,8 @@ impl MBR {
             .chain(logical_partitions.iter().map(|x| &x.partition))
             .filter(|x| x.is_used())
             .map(|x| x.starting_lba)
+            // every alignment divides 0, so LBA 0 (only in a corrupt table) constrains nothing
+            .filter(|&lba| lba != 0)
             .collect::<Vec<_>>();
 
         if lbas.is_empty() {
@@ -552,30 +388,40 @@ impl MBR {
             && self.sectors <= 63
     }
 
-    /// Write the MBR to a writer. This function will seek automatically in the writer.
-    /// This function will update the CHS address of the partitions automatically if a valid
+    /// Validate the MBR and the EBRs of the logical partitions, then return the boot records
+    /// to write to the disk, each with its LBA: the MBR first, then the EBRs. This
+    /// function will update the CHS address of the partitions automatically if a valid
     /// geometry has been set. See `check_geometry`.
+    ///
+    /// Nothing is returned if the partition table is invalid, so a disk is never left with
+    /// half of a partition table. With `std`, `MBR::write_into` does the I/O for you.
+    ///
+    /// # Remarks
+    ///
+    /// The MBR itself may have been updated even when an error is returned: the EBR address of
+    /// the first logical partition, its EBR size and last EBR CHS address, and the CHS addresses
+    /// of the logical partitions when a valid geometry is set. These values are rewritten on every
+    /// call, so call `chunks` again once the table is fixed.
     ///
     /// # Examples
     /// Basic usage:
     /// ```
-    /// let ss = 512;
-    /// let data = vec![0; 100 * ss as usize];
-    /// let mut cur = std::io::Cursor::new(data);
-    /// let mut mbr = mbrman::MBR::new_from(&mut cur, ss as u32, [0xff; 4])
-    ///     .expect("could not make a partition table");
+    /// # #[cfg(feature = "alloc")] {
+    /// let mut disk = vec![0; 100 * 512];
+    /// let mut mbr = mbrman::MBR::new(512, disk.len() as u64, [0xff; 4]);
     ///
     /// // actually write:
-    /// mbr.write_into(&mut cur)
-    ///     .expect("could not write MBR to disk")
+    /// for chunk in mbr.chunks().expect("invalid partition table") {
+    ///     let start = chunk.lba as usize * 512;
+    ///     disk[start..start + 512].copy_from_slice(&chunk.data);
+    /// }
+    /// # }
     /// ```
-    pub fn write_into<W>(&mut self, mut writer: &mut W) -> Result<()>
-    where
-        W: Write + Seek + ?Sized,
-    {
-        self.header.write_into(&mut writer)?;
+    pub fn chunks(&mut self) -> Result<Chunks<'_>> {
+        let header = self.header.to_bytes()?;
+        let extended = self.header.get_extended_partition().cloned();
 
-        if let Some(extended) = self.header.get_extended_partition() {
+        if let Some(extended) = &extended {
             if let Some(first) = self.logical_partitions.get_mut(0) {
                 first.absolute_ebr_lba = extended.starting_lba;
                 first.ebr_sectors = None;
@@ -588,45 +434,46 @@ impl MBR {
                 }
             }
 
-            let next_logical_partitions = self
-                .logical_partitions
-                .iter()
-                .skip(1)
-                .map(Some)
-                .chain(once(None));
-            for (l, next) in self.logical_partitions.iter().zip(next_logical_partitions) {
-                let partition = MBRPartitionEntry {
-                    starting_lba: l.partition.starting_lba.saturating_sub(l.absolute_ebr_lba),
-                    ..l.partition
-                };
-                partition.check()?;
-                writer.seek(SeekFrom::Start(
-                    u64::from(l.absolute_ebr_lba) * u64::from(self.sector_size),
-                ))?;
-                let next_ebr = match next {
-                    Some(next) => MBRPartitionEntry {
-                        boot: BOOT_INACTIVE,
-                        first_chs: next.ebr_first_chs,
-                        sys: extended.sys,
-                        last_chs: next.ebr_last_chs.unwrap(),
-                        starting_lba: next.absolute_ebr_lba.saturating_sub(extended.starting_lba),
-                        sectors: next.ebr_sectors.unwrap(),
-                    },
-                    None => MBRPartitionEntry::empty(),
-                };
-                let ebr = EBRHeader {
-                    bootstrap_code: l.bootstrap_code,
-                    partition_1: partition,
-                    partition_2: next_ebr,
-                    _unused_partition_3: [0; 16],
-                    _unused_partition_4: [0; 16],
-                    boot_signature: BOOT_SIGNATURE,
-                };
-                writer.write_all(&ebr.to_bytes())?;
+            for i in 0..self.logical_partitions.len() {
+                self.ebr(i, extended)?;
             }
         }
 
-        Ok(())
+        Ok(Chunks {
+            mbr: self,
+            header: Some(header),
+            extended,
+            next: 0,
+        })
+    }
+
+    /// Build and validate the EBR of the logical partition `i`.
+    fn ebr(&self, i: usize, extended: &MBRPartitionEntry) -> Result<EBRHeader> {
+        let l = &self.logical_partitions[i];
+        let partition = MBRPartitionEntry {
+            starting_lba: l.partition.starting_lba.saturating_sub(l.absolute_ebr_lba),
+            ..l.partition
+        };
+        partition.check()?;
+        let next_ebr = match self.logical_partitions.get(i + 1) {
+            Some(next) => MBRPartitionEntry {
+                boot: BOOT_INACTIVE,
+                first_chs: next.ebr_first_chs,
+                sys: extended.sys,
+                last_chs: next.ebr_last_chs.ok_or(Error::InconsistentEBR)?,
+                starting_lba: next.absolute_ebr_lba.saturating_sub(extended.starting_lba),
+                sectors: next.ebr_sectors.ok_or(Error::InconsistentEBR)?,
+            },
+            None => MBRPartitionEntry::empty(),
+        };
+        Ok(EBRHeader {
+            bootstrap_code: l.bootstrap_code,
+            partition_1: partition,
+            partition_2: next_ebr,
+            _unused_partition_3: [0; 16],
+            _unused_partition_4: [0; 16],
+            boot_signature: BOOT_SIGNATURE,
+        })
     }
 
     /// Get a cylinder size in sectors. This function is useful if you want to
@@ -690,6 +537,7 @@ impl MBR {
     /// # Examples
     /// Basic usage:
     /// ```
+    /// # #[cfg(feature = "std")] {
     /// let ss = 512;
     /// let data = vec![0; 100 * ss as usize];
     /// let mut cur = std::io::Cursor::new(data);
@@ -713,6 +561,7 @@ impl MBR {
     ///     mbr.find_free_sectors(),
     ///     vec![(1, 5), (mbr.disk_size - 5, 5)]
     /// );
+    /// # }
     /// ```
     pub fn find_free_sectors(&self) -> Vec<(u32, u32)> {
         assert!(self.align > 0, "align must be greater than 0");
@@ -764,6 +613,7 @@ impl MBR {
     /// # Examples:
     /// Basic usage:
     /// ```
+    /// # #[cfg(feature = "std")] {
     /// let ss = 512;
     /// let data = vec![0; 100 * ss as usize];
     /// let mut cur = std::io::Cursor::new(data);
@@ -784,6 +634,7 @@ impl MBR {
     /// mbr.align = 1;
     ///
     /// assert_eq!(mbr.find_first_place(5), Some(1));
+    /// # }
     /// ```
     pub fn find_first_place(&self, size: u32) -> Option<u32> {
         self.find_free_sectors()
@@ -799,6 +650,7 @@ impl MBR {
     /// # Examples:
     /// Basic usage:
     /// ```
+    /// # #[cfg(feature = "std")] {
     /// let ss = 512;
     /// let data = vec![0; 100 * ss as usize];
     /// let mut cur = std::io::Cursor::new(data);
@@ -819,12 +671,12 @@ impl MBR {
     /// mbr.align = 1;
     ///
     /// assert_eq!(mbr.find_last_place(5), Some(mbr.disk_size - 5));
+    /// # }
     /// ```
     pub fn find_last_place(&self, size: u32) -> Option<u32> {
         self.find_free_sectors()
             .iter()
-            .filter(|(_, l)| *l >= size)
-            .last()
+            .rfind(|(_, l)| *l >= size)
             .map(|(i, l)| (i + l - size) / self.align * self.align)
     }
 
@@ -835,6 +687,7 @@ impl MBR {
     /// # Examples:
     /// Basic usage:
     /// ```
+    /// # #[cfg(feature = "std")] {
     /// let ss = 512;
     /// let data = vec![0; 100 * ss as usize];
     /// let mut cur = std::io::Cursor::new(data);
@@ -857,15 +710,14 @@ impl MBR {
     /// // NOTE: the space as the end is more optimal because it will allow you to still be able to
     /// //       insert a bigger partition later
     /// assert_eq!(mbr.find_optimal_place(5), Some(mbr.disk_size - 5));
+    /// # }
     /// ```
     pub fn find_optimal_place(&self, size: u32) -> Option<u32> {
-        let mut slots = self
-            .find_free_sectors()
+        self.find_free_sectors()
             .into_iter()
             .filter(|(_, l)| *l >= size)
-            .collect::<Vec<_>>();
-        slots.sort_by(|(_, l1), (_, l2)| l1.cmp(l2));
-        slots.first().map(|&(i, _)| i)
+            .min_by_key(|(_, l)| *l)
+            .map(|(i, _)| i)
     }
 
     /// Get the maximum size (in sectors) of a partition you could create in the MBR.
@@ -874,6 +726,7 @@ impl MBR {
     /// # Examples:
     /// Basic usage:
     /// ```
+    /// # #[cfg(feature = "std")] {
     /// let ss = 512;
     /// let data = vec![0; 100 * ss as usize];
     /// let mut cur = std::io::Cursor::new(data);
@@ -888,6 +741,7 @@ impl MBR {
     ///     mbr.get_maximum_partition_size().unwrap_or(0),
     ///     mbr.disk_size - 1
     /// );
+    /// # }
     /// ```
     pub fn get_maximum_partition_size(&self) -> Result<u32> {
         self.find_free_sectors()
@@ -904,6 +758,7 @@ impl MBR {
     /// # Examples:
     /// Basic usage:
     /// ```
+    /// # #[cfg(feature = "std")] {
     /// let ss = 512;
     /// let data = vec![0; 100 * ss as usize];
     /// let mut cur = std::io::Cursor::new(data);
@@ -928,6 +783,7 @@ impl MBR {
     ///         .expect("could not find a place to put the partition"),
     ///     mbr.disk_size - 1
     /// );
+    /// # }
     /// ```
     pub fn get_maximum_partition_size_for(&mut self, i: usize) -> Result<u32> {
         let spots = self.find_free_sectors();
@@ -1026,6 +882,116 @@ impl MBR {
     }
 }
 
+/// The `std::io` integration.
+#[cfg(feature = "std")]
+impl MBR {
+    /// Make a new MBR
+    ///
+    /// # Panics
+    /// The sector size must be at least 512, the size of a boot record.
+    ///
+    /// # Examples
+    /// Basic usage:
+    /// ```
+    /// # #[cfg(feature = "std")] {
+    /// let mut f = std::fs::File::open("tests/fixtures/disk1.img")
+    ///     .expect("could not open disk");
+    /// let mbr = mbrman::MBR::new_from(&mut f, 512, [0x01, 0x02, 0x03, 0x04])
+    ///     .expect("could not make a partition table");
+    /// # }
+    /// ```
+    pub fn new_from<S>(seeker: &mut S, sector_size: u32, disk_signature: [u8; 4]) -> Result<MBR>
+    where
+        S: Seek + ?Sized,
+    {
+        Ok(MBR::new(
+            sector_size,
+            seeker.seek(SeekFrom::End(0))?,
+            disk_signature,
+        ))
+    }
+
+    /// Read the MBR on a reader.
+    ///
+    /// # Panics
+    /// The sector size must be at least 512, the size of a boot record.
+    ///
+    /// # Examples
+    /// Basic usage:
+    /// ```
+    /// # #[cfg(feature = "std")] {
+    /// let mut f = std::fs::File::open("tests/fixtures/disk1.img")
+    ///     .expect("could not open disk");
+    /// let mbr = mbrman::MBR::read_from(&mut f, 512)
+    ///     .expect("could not read the partition table");
+    /// # }
+    /// ```
+    pub fn read_from<R>(reader: &mut R, sector_size: u32) -> Result<MBR>
+    where
+        R: Read + Seek + ?Sized,
+    {
+        let mut mbr = MBR::reader(sector_size, reader.seek(SeekFrom::End(0))?);
+        while let Some(lba) = mbr.next_lba()? {
+            let offset = u64::from(lba) * u64::from(sector_size);
+            mbr.feed(&read_boot_record(reader, offset)?)?;
+        }
+        mbr.finish()
+    }
+
+    /// Updates the header to match the specifications of the seeker given in argument.
+    /// `disk_size` will be updated after this operation.
+    ///
+    /// # Panics
+    /// Panics if `sector_size` was changed to less than 512 after construction.
+    pub fn update_from<S>(&mut self, seeker: &mut S) -> Result<()>
+    where
+        S: Seek + ?Sized,
+    {
+        self.disk_size = disk_size_in_sectors(seeker.seek(SeekFrom::End(0))?, self.sector_size);
+        Ok(())
+    }
+
+    /// Write the MBR and the EBRs of the logical partitions to a disk, each at its own
+    /// offset. This function will update the CHS address of the partitions automatically if a valid
+    /// geometry has been set. See `check_geometry`.
+    ///
+    /// Nothing is written if the partition table is invalid. See `MBR::chunks`.
+    ///
+    /// # Panics
+    /// Panics if `sector_size` was changed to less than 512 after construction: every boot
+    /// record would be written at an overlapping offset.
+    ///
+    /// # Examples
+    /// Basic usage:
+    /// ```
+    /// # #[cfg(feature = "std")] {
+    /// let ss = 512;
+    /// let data = vec![0; 100 * ss as usize];
+    /// let mut cur = std::io::Cursor::new(data);
+    /// let mut mbr = mbrman::MBR::new_from(&mut cur, ss as u32, [0xff; 4])
+    ///     .expect("could not make a partition table");
+    ///
+    /// // actually write:
+    /// mbr.write_into(&mut cur)
+    ///     .expect("could not write MBR to disk")
+    /// # }
+    /// ```
+    pub fn write_into<W>(&mut self, writer: &mut W) -> Result<()>
+    where
+        W: Write + Seek + ?Sized,
+    {
+        // guard against a sector size changed after construction: every record would be
+        // written at an overlapping offset
+        check_sector_size(self.sector_size);
+        let sector_size = u64::from(self.sector_size);
+        for chunk in self.chunks()? {
+            write_boot_record(writer, u64::from(chunk.lba) * sector_size, &chunk.data)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "alloc")]
 impl Index<usize> for MBR {
     type Output = MBRPartitionEntry;
 
@@ -1035,6 +1001,7 @@ impl Index<usize> for MBR {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl IndexMut<usize> for MBR {
     fn index_mut(&mut self, i: usize) -> &mut Self::Output {
         assert!(i != 0, "invalid partition index: 0");
@@ -1110,7 +1077,7 @@ impl MBRHeader {
     /// Get an iterator over the primary partition entries and their index. The
     /// index always starts at 1.
     pub fn iter(&self) -> impl Iterator<Item = (usize, &MBRPartitionEntry)> {
-        vec![
+        [
             &self.partition_1,
             &self.partition_2,
             &self.partition_3,
@@ -1124,7 +1091,7 @@ impl MBRHeader {
     /// Get a mutable iterator over the primary partition entries and their
     /// index. The index always starts at 1.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (usize, &mut MBRPartitionEntry)> {
-        vec![
+        [
             &mut self.partition_1,
             &mut self.partition_2,
             &mut self.partition_3,
@@ -1139,27 +1106,70 @@ impl MBRHeader {
         self.iter().find(|(_, x)| x.is_extended()).map(|(_, x)| x)
     }
 
-    /// Attempt to read a MBR header from a reader.  This operation will seek at the
-    /// correct location before trying to read from disk.
+    /// Read and validate the MBR header in the first sector of a disk.
+    #[cfg(feature = "std")]
     pub fn read_from<R>(reader: &mut R) -> Result<MBRHeader>
     where
         R: Read + Seek + ?Sized,
     {
-        reader.seek(SeekFrom::Start(0))?;
-        MBRHeader::from_bytes(&read_boot_record(reader)?)
+        MBRHeader::from_bytes(&read_boot_record(reader, 0)?)
+    }
+
+    /// Walk the EBR chain of the extended partition, one logical partition at a time, without
+    /// doing any I/O and without allocating. The walk is over at once if there is no extended
+    /// partition.
+    ///
+    /// With `alloc`, `MBR::reader` reads the MBR and the same partitions into an `MBR`.
+    ///
+    /// # Examples
+    /// Basic usage:
+    /// ```
+    /// let disk: &[u8] = include_bytes!("../tests/fixtures/disk2.img");
+    /// let sector = |lba: u32| -> &[u8; 512] {
+    ///     let start = lba as usize * 512;
+    ///     disk[start..start + 512].try_into().unwrap()
+    /// };
+    ///
+    /// let header = mbrman::MBRHeader::from_bytes(sector(0))
+    ///     .expect("could not read the MBR header");
+    /// let mut walk = header.ebr_walk();
+    /// while let Some(lba) = walk.next_lba().expect("invalid EBR chain") {
+    ///     if let Some(l) = walk.feed(sector(lba)).expect("could not read an EBR") {
+    ///         println!("logical partition: starting lba = {}", l.partition.starting_lba);
+    ///     }
+    /// }
+    /// ```
+    pub fn ebr_walk(&self) -> EBRWalk {
+        let extended = self.get_extended_partition().cloned();
+        EBRWalk {
+            ebr_first_chs: extended.as_ref().map_or_else(CHS::empty, |x| x.first_chs),
+            extended,
+            failed: false,
+            relative_ebr_lba: 0,
+            ebr_sectors: None,
+            ebr_last_chs: None,
+        }
     }
 
     /// Decode and validate a MBR header from the 512 bytes of the first sector.
     pub fn from_bytes(bytes: &[u8; 512]) -> Result<MBRHeader> {
+        let bootstrap_code: [u8; 440] = bytes[..440].try_into().unwrap();
+        let disk_signature: [u8; 4] = bytes[440..444].try_into().unwrap();
+        let copy_protected: [u8; 2] = bytes[444..446].try_into().unwrap();
+        let partition_1: &[u8; 16] = bytes[446..462].try_into().unwrap();
+        let partition_2: &[u8; 16] = bytes[462..478].try_into().unwrap();
+        let partition_3: &[u8; 16] = bytes[478..494].try_into().unwrap();
+        let partition_4: &[u8; 16] = bytes[494..510].try_into().unwrap();
+        let boot_signature: [u8; 2] = bytes[510..].try_into().unwrap();
         let header = MBRHeader {
-            bootstrap_code: chunk(bytes, 0),
-            disk_signature: chunk(bytes, 440),
-            copy_protected: chunk(bytes, 444),
-            partition_1: MBRPartitionEntry::from_bytes(&chunk(bytes, 446)),
-            partition_2: MBRPartitionEntry::from_bytes(&chunk(bytes, 462)),
-            partition_3: MBRPartitionEntry::from_bytes(&chunk(bytes, 478)),
-            partition_4: MBRPartitionEntry::from_bytes(&chunk(bytes, 494)),
-            boot_signature: chunk(bytes, 510),
+            bootstrap_code,
+            disk_signature,
+            copy_protected,
+            partition_1: MBRPartitionEntry::from_bytes(partition_1),
+            partition_2: MBRPartitionEntry::from_bytes(partition_2),
+            partition_3: MBRPartitionEntry::from_bytes(partition_3),
+            partition_4: MBRPartitionEntry::from_bytes(partition_4),
+            boot_signature,
         };
         header.check()?;
         Ok(header)
@@ -1168,7 +1178,7 @@ impl MBRHeader {
     /// Validate the MBR header and encode it as the 512 bytes of the first sector.
     pub fn to_bytes(&self) -> Result<[u8; 512]> {
         self.check()?;
-        let mut bytes = [0; BOOT_RECORD_SIZE];
+        let mut bytes = [0; 512];
         bytes[..440].copy_from_slice(&self.bootstrap_code);
         bytes[440..444].copy_from_slice(&self.disk_signature);
         bytes[444..446].copy_from_slice(&self.copy_protected);
@@ -1199,17 +1209,13 @@ impl MBRHeader {
         }
     }
 
-    /// Write the MBR header into a writer. This operation will seek at the
-    /// correct location before trying to write to disk.
+    /// Validate the MBR header and write it to the first sector of a disk.
+    #[cfg(feature = "std")]
     pub fn write_into<W>(&self, writer: &mut W) -> Result<()>
     where
         W: Write + Seek + ?Sized,
     {
-        let bytes = self.to_bytes()?;
-        writer.seek(SeekFrom::Start(0))?;
-        writer.write_all(&bytes)?;
-
-        Ok(())
+        write_boot_record(writer, 0, &self.to_bytes()?)
     }
 
     /// Validate invariants
@@ -1248,25 +1254,28 @@ struct EBRHeader {
 }
 
 impl EBRHeader {
-    fn read_from<R>(reader: &mut R) -> Result<EBRHeader>
-    where
-        R: Read,
-    {
-        let bytes = read_boot_record(reader)?;
+    fn from_bytes(bytes: &[u8; 512]) -> Result<EBRHeader> {
+        let bootstrap_code: [u8; 446] = bytes[..446].try_into().unwrap();
+        let partition_1: &[u8; 16] = bytes[446..462].try_into().unwrap();
+        let partition_2: &[u8; 16] = bytes[462..478].try_into().unwrap();
+        let _unused_partition_3: [u8; 16] = bytes[478..494].try_into().unwrap();
+        let _unused_partition_4: [u8; 16] = bytes[494..510].try_into().unwrap();
+        let boot_signature: [u8; 2] = bytes[510..].try_into().unwrap();
         let header = EBRHeader {
-            bootstrap_code: chunk(&bytes, 0),
-            partition_1: MBRPartitionEntry::from_bytes(&chunk(&bytes, 446)),
-            partition_2: MBRPartitionEntry::from_bytes(&chunk(&bytes, 462)),
-            _unused_partition_3: chunk(&bytes, 478),
-            _unused_partition_4: chunk(&bytes, 494),
-            boot_signature: chunk(&bytes, 510),
+            bootstrap_code,
+            partition_1: MBRPartitionEntry::from_bytes(partition_1),
+            partition_2: MBRPartitionEntry::from_bytes(partition_2),
+            _unused_partition_3,
+            _unused_partition_4,
+            boot_signature,
         };
         header.check()?;
         Ok(header)
     }
 
-    fn to_bytes(&self) -> [u8; BOOT_RECORD_SIZE] {
-        let mut bytes = [0; BOOT_RECORD_SIZE];
+    #[cfg(feature = "alloc")]
+    fn to_bytes(&self) -> [u8; 512] {
+        let mut bytes = [0; 512];
         bytes[..446].copy_from_slice(&self.bootstrap_code);
         bytes[446..462].copy_from_slice(&self.partition_1.to_bytes());
         bytes[462..478].copy_from_slice(&self.partition_2.to_bytes());
@@ -1310,13 +1319,17 @@ pub struct MBRPartitionEntry {
 impl MBRPartitionEntry {
     /// Decode a partition entry from its 16 on-disk bytes. No validation is done.
     pub fn from_bytes(bytes: &[u8; 16]) -> MBRPartitionEntry {
+        let first_chs: &[u8; 3] = bytes[1..4].try_into().unwrap();
+        let last_chs: &[u8; 3] = bytes[5..8].try_into().unwrap();
+        let starting_lba: [u8; 4] = bytes[8..12].try_into().unwrap();
+        let sectors: [u8; 4] = bytes[12..16].try_into().unwrap();
         MBRPartitionEntry {
             boot: bytes[0],
-            first_chs: CHS::from_bytes(&chunk(bytes, 1)),
+            first_chs: CHS::from_bytes(first_chs),
             sys: bytes[4],
-            last_chs: CHS::from_bytes(&chunk(bytes, 5)),
-            starting_lba: u32::from_le_bytes(chunk(bytes, 8)),
-            sectors: u32::from_le_bytes(chunk(bytes, 12)),
+            last_chs: CHS::from_bytes(last_chs),
+            starting_lba: u32::from_le_bytes(starting_lba),
+            sectors: u32::from_le_bytes(sectors),
         }
     }
 
@@ -1337,6 +1350,7 @@ impl MBRPartitionEntry {
     /// # Examples
     /// Basic usage:
     /// ```
+    /// # #[cfg(feature = "std")] {
     /// let ss = 512;
     /// let data = vec![0; 100 * ss as usize];
     /// let mut cur = std::io::Cursor::new(data);
@@ -1347,6 +1361,7 @@ impl MBRPartitionEntry {
     ///
     /// // NOTE: an empty partition entry is considered as not allocated
     /// assert!(mbr[1].is_unused());
+    /// # }
     /// ```
     pub fn empty() -> MBRPartitionEntry {
         MBRPartitionEntry {
@@ -1448,6 +1463,259 @@ impl LogicalPartition {
         Ok(())
     }
 }
+
+/// A walk through the EBR chain of an extended partition, one logical partition at a time,
+/// that does no I/O: it asks for each EBR to read and you feed it the 512 bytes you read.
+///
+/// Call `next_lba` to get the LBA of the next EBR, read the first 512 bytes of that sector and
+/// give them to `feed`, until `next_lba` returns `None`. The walk is over after the first error.
+///
+/// Created by [`MBRHeader::ebr_walk`], which has an example.
+#[derive(Debug, Clone)]
+pub struct EBRWalk {
+    /// The extended partition, `None` once the walk is over.
+    extended: Option<MBRPartitionEntry>,
+    /// The walk ended on an error.
+    failed: bool,
+    relative_ebr_lba: u32,
+    ebr_sectors: Option<u32>,
+    ebr_first_chs: CHS,
+    ebr_last_chs: Option<CHS>,
+}
+
+impl EBRWalk {
+    /// Return the LBA of the next EBR to read, or `None` when the walk is over.
+    ///
+    /// Return `Error::InconsistentEBR` if the EBR the chain links to cannot be addressed.
+    pub fn next_lba(&self) -> Result<Option<u32>> {
+        match &self.extended {
+            Some(extended) => self.absolute_ebr_lba(extended).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Decode the 512 bytes read at the LBA `next_lba` returned. Return the logical
+    /// partition of that EBR, or `None` if the extended partition is empty.
+    ///
+    /// Return `Error::OutOfSequence` if the walk is already over.
+    pub fn feed(&mut self, sector: &[u8; 512]) -> Result<Option<LogicalPartition>> {
+        // the walk ends here unless the EBR links to another one
+        let extended = self.extended.take().ok_or(Error::OutOfSequence)?;
+        let res = self.decode(&extended, sector);
+        match res {
+            Ok(Some(_)) if self.relative_ebr_lba != 0 => self.extended = Some(extended),
+            Err(_) => self.failed = true,
+            _ => {}
+        }
+        res
+    }
+
+    /// Return `true` if the walk reached the end of the chain without error.
+    #[cfg(feature = "alloc")]
+    fn is_done(&self) -> bool {
+        self.extended.is_none() && !self.failed
+    }
+
+    /// The absolute LBA of the next EBR.
+    fn absolute_ebr_lba(&self, extended: &MBRPartitionEntry) -> Result<u32> {
+        // check the link before following it: an EBR past u32::MAX cannot be
+        // represented, so it must not be read
+        extended
+            .starting_lba
+            .checked_add(self.relative_ebr_lba)
+            .ok_or(Error::InconsistentEBR)
+    }
+
+    /// Decode the EBR `relative_ebr_lba` points to. Return `None` if the extended partition
+    /// is empty.
+    fn decode(
+        &mut self,
+        extended: &MBRPartitionEntry,
+        sector: &[u8; 512],
+    ) -> Result<Option<LogicalPartition>> {
+        // NOTE: The number of sectors is an index field; thus, the zero
+        //       value is invalid, reserved and must not be used in normal
+        //       partition entries. The entry is used by operating systems
+        //       in certain circumstances; in such cases the CHS addresses
+        //       are ignored.
+
+        let absolute_ebr_lba = self.absolute_ebr_lba(extended)?;
+        let ebr = match EBRHeader::from_bytes(sector) {
+            Ok(ebr) => ebr,
+            // NOTE: if the extended partition is empty, it is not required that an
+            //       EBR exists
+            Err(Error::InvalidSignature) if self.relative_ebr_lba == 0 => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        let (partition, next, bootstrap_code) = ebr.unwrap();
+        let starting_lba = partition
+            .starting_lba
+            .checked_add(absolute_ebr_lba)
+            .ok_or(Error::InconsistentEBR)?;
+        let logical_partition = LogicalPartition {
+            partition: MBRPartitionEntry {
+                starting_lba,
+                ..partition
+            },
+            absolute_ebr_lba,
+            ebr_sectors: self.ebr_sectors,
+            ebr_first_chs: self.ebr_first_chs,
+            ebr_last_chs: self.ebr_last_chs,
+            bootstrap_code,
+        };
+
+        // the links must go forward, otherwise the chain could loop
+        if next.starting_lba > 0 && self.relative_ebr_lba >= next.starting_lba {
+            return Err(Error::InconsistentEBR);
+        }
+
+        self.relative_ebr_lba = next.starting_lba;
+        self.ebr_sectors = Some(next.sectors);
+        self.ebr_first_chs = next.first_chs;
+        self.ebr_last_chs = Some(next.last_chs);
+
+        Ok(Some(logical_partition))
+    }
+}
+
+/// A read of an MBR and its EBRs that does no I/O: it asks for each boot record to read and you
+/// feed it the 512 bytes you read.
+///
+/// Call `next_lba` to get the LBA of the next boot record, read the first 512 bytes of that
+/// sector and give them to `feed`, until `next_lba` returns `None`. Then `finish` returns the
+/// `MBR`. The MBR comes first, at LBA 0, then the EBRs.
+///
+/// Created by [`MBR::reader`].
+///
+/// # Examples
+/// Basic usage:
+/// ```
+/// let disk: &[u8] = include_bytes!("../tests/fixtures/disk2.img");
+///
+/// let mut reader = mbrman::MBR::reader(512, disk.len() as u64);
+/// while let Some(lba) = reader.next_lba().expect("invalid EBR chain") {
+///     let start = lba as usize * 512;
+///     reader
+///         .feed(disk[start..start + 512].try_into().unwrap())
+///         .expect("could not read a boot record");
+/// }
+/// let mbr = reader.finish().expect("could not read the partition table");
+/// assert_eq!(mbr.logical_partitions.len(), 5);
+/// ```
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone)]
+pub struct MBRReader {
+    sector_size: u32,
+    /// Disk size in sectors
+    disk_size: u32,
+    /// The MBR header and the walk of its EBR chain, once the MBR has been read
+    table: Option<(MBRHeader, EBRWalk)>,
+    logical_partitions: Vec<LogicalPartition>,
+}
+
+#[cfg(feature = "alloc")]
+impl MBRReader {
+    /// Return the LBA of the next boot record to read, or `None` when the whole
+    /// partition table has been read. `None` is also returned after `feed` failed on an EBR:
+    /// the reader then asks for nothing more. After `feed` failed on the MBR, it asks for LBA 0
+    /// again. In both cases `finish` returns `Error::OutOfSequence`.
+    ///
+    /// Return `Error::InconsistentEBR` if the EBR the chain links to cannot be addressed.
+    pub fn next_lba(&self) -> Result<Option<u32>> {
+        match &self.table {
+            Some((_, walk)) => walk.next_lba(),
+            None => Ok(Some(0)),
+        }
+    }
+
+    /// Decode the 512 bytes read at the LBA `next_lba` returned.
+    ///
+    /// Return `Error::OutOfSequence` if the whole partition table has already been read.
+    pub fn feed(&mut self, sector: &[u8; 512]) -> Result<()> {
+        match &mut self.table {
+            Some((_, walk)) => self.logical_partitions.extend(walk.feed(sector)?),
+            None => {
+                let header = MBRHeader::from_bytes(sector)?;
+                let walk = header.ebr_walk();
+                self.table = Some((header, walk));
+            }
+        }
+        Ok(())
+    }
+
+    /// Return the MBR read.
+    ///
+    /// Return `Error::OutOfSequence` if the partition table has not been read completely and
+    /// without error.
+    pub fn finish(self) -> Result<MBR> {
+        let (header, walk) = self.table.ok_or(Error::OutOfSequence)?;
+        if !walk.is_done() {
+            return Err(Error::OutOfSequence);
+        }
+        let align = MBR::find_alignment(&header, &self.logical_partitions);
+
+        Ok(MBR {
+            sector_size: self.sector_size,
+            header,
+            logical_partitions: self.logical_partitions,
+            align,
+            cylinders: 0,
+            heads: 0,
+            sectors: 0,
+            disk_size: self.disk_size,
+        })
+    }
+}
+
+/// A boot record to write to the disk, produced by [`MBR::chunks`].
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Chunk {
+    /// LBA of the boot record on the disk, in sectors of the MBR's sector size
+    pub lba: u32,
+    /// The 512 bytes of the boot record
+    pub data: [u8; 512],
+}
+
+/// An iterator over the boot records to write to the disk: the MBR, then the EBRs.
+///
+/// Created by [`MBR::chunks`], which validated them all.
+#[cfg(feature = "alloc")]
+#[derive(Debug)]
+pub struct Chunks<'a> {
+    mbr: &'a MBR,
+    /// The MBR, until it is returned
+    header: Option<[u8; 512]>,
+    /// The extended partition, `None` if there are no EBRs to write
+    extended: Option<MBRPartitionEntry>,
+    /// The index of the next logical partition
+    next: usize,
+}
+
+#[cfg(feature = "alloc")]
+impl Iterator for Chunks<'_> {
+    type Item = Chunk;
+
+    fn next(&mut self) -> Option<Chunk> {
+        if let Some(data) = self.header.take() {
+            return Some(Chunk { lba: 0, data });
+        }
+        let extended = self.extended.as_ref()?;
+        let l = self.mbr.logical_partitions.get(self.next)?;
+        let ebr = self
+            .mbr
+            .ebr(self.next, extended)
+            .expect("the EBRs are validated by MBR::chunks");
+        self.next += 1;
+        Some(Chunk {
+            lba: l.absolute_ebr_lba,
+            data: ebr.to_bytes(),
+        })
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl FusedIterator for Chunks<'_> {}
 
 /// A CHS address (cylinder/head/sector)
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -1609,12 +1877,345 @@ impl CHS {
     }
 }
 
+/// Tests that build in every feature set, `std` and `alloc` included: they feed byte slices to
+/// the readers, without `std::io`.
 #[cfg(test)]
+mod core_tests {
+    use super::*;
+
+    const DISK2: &[u8] = include_bytes!("../tests/fixtures/disk2.img");
+
+    /// The boot record at the start of sector `lba` of `disk`.
+    fn sector(disk: &[u8], lba: u32) -> &[u8; 512] {
+        let start = lba as usize * 512;
+        disk[start..start + 512].try_into().unwrap()
+    }
+
+    #[test]
+    fn ebr_walk_of_disk2() {
+        let header = MBRHeader::from_bytes(sector(DISK2, 0)).unwrap();
+        let expected = [
+            (5, None),
+            (7, Some(3)),
+            (10, Some(4)),
+            (14, Some(2)),
+            (16, Some(2)),
+        ];
+
+        let mut walk = header.ebr_walk();
+        for (absolute_ebr_lba, ebr_sectors) in expected {
+            let lba = walk.next_lba().unwrap().unwrap();
+            assert_eq!(lba, absolute_ebr_lba);
+            let l = walk.feed(sector(DISK2, lba)).unwrap().unwrap();
+            assert_eq!(l.absolute_ebr_lba, absolute_ebr_lba);
+            assert_eq!(l.ebr_sectors, ebr_sectors);
+            assert_eq!(l.partition.sys, 0x83);
+        }
+        assert_eq!(walk.next_lba().unwrap(), None);
+    }
+
+    #[test]
+    fn ebr_walk_without_extended_partition() {
+        let header = MBRHeader::new([0xff; 4]);
+        let mut walk = header.ebr_walk();
+        assert_eq!(walk.next_lba().unwrap(), None);
+        assert!(matches!(
+            walk.feed(sector(DISK2, 0)),
+            Err(Error::OutOfSequence)
+        ));
+    }
+
+    #[test]
+    fn ebr_walk_of_empty_extended_partition() {
+        let mut data = [0; 10240];
+        data.copy_from_slice(DISK2);
+        // the first EBR, at LBA 5, has no signature: the extended partition is empty
+        data[5 * 512 + 510..6 * 512].fill(0);
+
+        let header = MBRHeader::from_bytes(sector(&data, 0)).unwrap();
+        let mut walk = header.ebr_walk();
+        assert_eq!(walk.next_lba().unwrap(), Some(5));
+        assert!(walk.feed(sector(&data, 5)).unwrap().is_none());
+        // a finished walk asks for nothing more
+        assert_eq!(walk.next_lba().unwrap(), None);
+        assert!(matches!(
+            walk.feed(sector(&data, 5)),
+            Err(Error::OutOfSequence)
+        ));
+    }
+
+    #[test]
+    fn ebr_walk_with_backward_link() {
+        let mut data = [0; 10240];
+        data.copy_from_slice(DISK2);
+        // the EBR at LBA 7 (relative LBA 2) links back to relative LBA 1
+        let link = 7 * 512 + 462 + 8;
+        data[link..link + 4].copy_from_slice(&1_u32.to_le_bytes());
+
+        let header = MBRHeader::from_bytes(sector(&data, 0)).unwrap();
+        let mut walk = header.ebr_walk();
+        let l = walk.feed(sector(&data, 5)).unwrap().unwrap();
+        assert_eq!(l.absolute_ebr_lba, 5);
+        assert_eq!(walk.next_lba().unwrap(), Some(7));
+        assert!(matches!(
+            walk.feed(sector(&data, 7)),
+            Err(Error::InconsistentEBR)
+        ));
+        // the walk is over after an error
+        assert_eq!(walk.next_lba().unwrap(), None);
+    }
+
+    #[test]
+    fn ebr_walk_with_overflowing_link() {
+        let mut header = MBRHeader::new([0xff; 4]);
+        header.partition_1 = MBRPartitionEntry {
+            sys: 0x0f,
+            starting_lba: u32::MAX - 1,
+            sectors: 1,
+            ..MBRPartitionEntry::empty()
+        };
+        // an EBR whose next link points past u32::MAX
+        let mut ebr = [0; 512];
+        ebr[446 + 4] = 0x83;
+        ebr[462 + 4] = 0x0f;
+        ebr[462 + 8..462 + 12].copy_from_slice(&5_u32.to_le_bytes());
+        ebr[510..].copy_from_slice(&BOOT_SIGNATURE);
+
+        let mut walk = header.ebr_walk();
+        assert_eq!(walk.next_lba().unwrap(), Some(u32::MAX - 1));
+        assert!(walk.feed(&ebr).unwrap().is_some());
+        assert!(matches!(walk.next_lba(), Err(Error::InconsistentEBR)));
+        assert!(matches!(walk.feed(&ebr), Err(Error::InconsistentEBR)));
+        assert_eq!(walk.next_lba().unwrap(), None);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn mbr_reader_of_disk2() {
+        let mut reader = MBR::reader(512, DISK2.len() as u64);
+        let mut reads = 0;
+        while let Some(lba) = reader.next_lba().unwrap() {
+            reader.feed(sector(DISK2, lba)).unwrap();
+            reads += 1;
+        }
+        // the MBR and 5 EBRs
+        assert_eq!(reads, 6);
+        let mbr = reader.finish().unwrap();
+        assert_eq!(mbr.disk_size, 20);
+        assert_eq!(mbr.logical_partitions.len(), 5);
+        assert_eq!(mbr.header, MBRHeader::from_bytes(sector(DISK2, 0)).unwrap());
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn mbr_reader_out_of_sequence() {
+        // finished before the MBR is read
+        let reader = MBR::reader(512, DISK2.len() as u64);
+        assert!(matches!(reader.finish(), Err(Error::OutOfSequence)));
+
+        // finished before the EBRs are read
+        let mut reader = MBR::reader(512, DISK2.len() as u64);
+        reader.feed(sector(DISK2, 0)).unwrap();
+        assert!(matches!(reader.finish(), Err(Error::OutOfSequence)));
+
+        // fed after the whole table is read
+        let mut reader = MBR::reader(512, DISK2.len() as u64);
+        while let Some(lba) = reader.next_lba().unwrap() {
+            reader.feed(sector(DISK2, lba)).unwrap();
+        }
+        assert!(matches!(
+            reader.feed(sector(DISK2, 0)),
+            Err(Error::OutOfSequence)
+        ));
+        assert_eq!(reader.finish().unwrap().logical_partitions.len(), 5);
+
+        // a failed MBR feed asks for the MBR again
+        let mut reader = MBR::reader(512, DISK2.len() as u64);
+        assert!(reader.feed(&[0; 512]).is_err());
+        assert_eq!(reader.next_lba().unwrap(), Some(0));
+        assert!(matches!(reader.finish(), Err(Error::OutOfSequence)));
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn mbr_reader_after_an_error() {
+        let mut data = [0; 10240];
+        data.copy_from_slice(DISK2);
+        // the EBR at LBA 7 (relative LBA 2) links back to relative LBA 1
+        let link = 7 * 512 + 462 + 8;
+        data[link..link + 4].copy_from_slice(&1_u32.to_le_bytes());
+
+        let mut reader = MBR::reader(512, data.len() as u64);
+        let err = loop {
+            let lba = reader.next_lba().unwrap().unwrap();
+            if let Err(err) = reader.feed(sector(&data, lba)) {
+                break err;
+            }
+        };
+        assert!(matches!(err, Error::InconsistentEBR));
+        // a caller that goes on anyway asks for nothing more, and finish reports the misuse
+        assert_eq!(reader.next_lba().unwrap(), None);
+        assert!(matches!(reader.finish(), Err(Error::OutOfSequence)));
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn chunks_of_invalid_table() {
+        let mut mbr = MBR::new(512, 64 * 512, [0xff; 4]);
+        mbr[1] = MBRPartitionEntry {
+            sys: 0x0f,
+            starting_lba: 1,
+            sectors: 63,
+            ..MBRPartitionEntry::empty()
+        };
+        mbr.align = 1;
+        mbr.push(0x83, 1, 10).unwrap();
+        mbr.push(0x83, 12, 10).unwrap();
+        // the second logical partition is invalid: the MBR must not be written either
+        mbr.logical_partitions[1].partition.boot = 0x42;
+        assert!(matches!(mbr.chunks(), Err(Error::InvalidBootFlag)));
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn chunks_of_logical_partition_missing_its_ebr_fields() {
+        // the EBR fields of a logical partition are public, so a table built by hand can have
+        // them unset on any partition but the first one
+        for unset in [
+            (|l: &mut LogicalPartition| l.ebr_sectors = None) as fn(&mut LogicalPartition),
+            |l: &mut LogicalPartition| l.ebr_last_chs = None,
+        ] {
+            let mut mbr = MBR::new(512, 64 * 512, [0xff; 4]);
+            mbr[1] = MBRPartitionEntry {
+                sys: 0x0f,
+                starting_lba: 1,
+                sectors: 63,
+                ..MBRPartitionEntry::empty()
+            };
+            mbr.align = 1;
+            mbr.push(0x83, 1, 10).unwrap();
+            mbr.push(0x83, 12, 10).unwrap();
+            unset(&mut mbr.logical_partitions[1]);
+            assert!(matches!(mbr.chunks(), Err(Error::InconsistentEBR)));
+        }
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn chunks_round_trip() {
+        let mut mbr = MBR::new(512, 64 * 512, [0xff; 4]);
+        mbr[1] = MBRPartitionEntry {
+            sys: 0x0f,
+            starting_lba: 1,
+            sectors: 63,
+            ..MBRPartitionEntry::empty()
+        };
+        mbr.align = 1;
+        mbr.push(0x83, 1, 10).unwrap();
+        mbr.push(0x07, 12, 10).unwrap();
+
+        let mut disk = [0; 64 * 512];
+        let mut lbas = [0; 3];
+        let mut chunks = mbr.chunks().unwrap();
+        for (chunk, lba) in chunks.by_ref().zip(&mut lbas) {
+            let start = chunk.lba as usize * 512;
+            disk[start..start + 512].copy_from_slice(&chunk.data);
+            *lba = chunk.lba;
+        }
+        assert!(chunks.next().is_none());
+        // the MBR first, then each EBR
+        assert_eq!(lbas, [0, 1, 12]);
+
+        let mut reader = MBR::reader(512, disk.len() as u64);
+        while let Some(lba) = reader.next_lba().unwrap() {
+            reader.feed(sector(&disk, lba)).unwrap();
+        }
+        let read = reader.finish().unwrap();
+        assert_eq!(read.header, mbr.header);
+        assert_eq!(read.logical_partitions, mbr.logical_partitions);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    #[should_panic(expected = "the sector size must be at least 512 bytes")]
+    fn mbr_new_with_a_sector_size_smaller_than_a_boot_record() {
+        let _ = MBR::new(256, 1024, [0xff; 4]);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    #[should_panic(expected = "the sector size must be at least 512 bytes")]
+    fn mbr_reader_with_a_zero_sector_size() {
+        let _ = MBR::reader(0, 1024);
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
 #[allow(clippy::cognitive_complexity)]
 mod tests {
     use super::*;
     use std::fs::File;
-    use std::io::Cursor;
+    use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+    use std::vec;
+
+    #[test]
+    fn error_messages() {
+        use std::error::Error as _;
+        use std::string::ToString;
+
+        let cases = [
+            (
+                Error::LBAExceedsMaximumCHS,
+                "exceeded the maximum limit of CHS",
+            ),
+            (
+                Error::LBAExceedsMaximumCylinders,
+                "exceeded the maximum number of cylinders on disk",
+            ),
+            (
+                Error::Io(std::io::ErrorKind::UnexpectedEof.into()),
+                "generic I/O error",
+            ),
+            (Error::InconsistentEBR, "inconsistent extended boot record"),
+            (Error::NoExtendedPartition, "no extended partition"),
+            (
+                Error::EBRStartsBeforeExtendedPartition,
+                "EBR starts before the extended partition",
+            ),
+            (
+                Error::EBRStartsTooCloseToTheEndOfExtendedPartition,
+                "EBR starts too close to the end of the extended partition",
+            ),
+            (
+                Error::EBREndsAfterExtendedPartition,
+                "EBR ends after the extended partition",
+            ),
+            (
+                Error::NotEnoughSectorsToCreateLogicalPartition,
+                "not enough sectors to create a logical partition",
+            ),
+            (Error::PartitionNotFound, "partition not found"),
+            (Error::NoSpaceLeft, "no space left"),
+            (Error::InvalidSignature, "invalid MBR signature"),
+            (Error::InvalidBootFlag, "partition has invalid boot flag"),
+            (
+                Error::OutOfSequence,
+                "boot record fed out of sequence or read not finished",
+            ),
+        ];
+        for (err, msg) in cases {
+            assert_eq!(err.to_string(), msg);
+            assert_eq!(err.source().is_some(), matches!(err, Error::Io(_)));
+        }
+
+        let err = Error::from(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+        let source = err
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
+        assert_eq!(source.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
 
     const DISK1: &str = "tests/fixtures/disk1.img";
     const DISK2: &str = "tests/fixtures/disk2.img";
@@ -1718,6 +2319,19 @@ mod tests {
         assert_eq!(mbr.header.partition_2.sys, 0x0b);
         assert_eq!(mbr.header.partition_2.starting_lba, 3);
         assert_eq!(mbr.header.partition_2.sectors, 1);
+    }
+
+    #[test]
+    fn read_used_partition_at_lba_0() {
+        let ss = 512_u32;
+        let mut data = vec![0; 10 * ss as usize];
+        // partition 1 is used (sys 0x83) and starts at LBA 0, over the MBR itself
+        data[446 + 4] = 0x83;
+        data[446 + 12..446 + 16].copy_from_slice(&5_u32.to_le_bytes());
+        data[510..512].copy_from_slice(&BOOT_SIGNATURE);
+
+        let mbr = MBR::read_from(&mut Cursor::new(data), ss).unwrap();
+        assert_eq!(mbr.align, DEFAULT_ALIGN);
     }
 
     #[test]
@@ -2066,6 +2680,19 @@ mod tests {
     }
 
     #[test]
+    fn read_truncated_ebr_chain() {
+        let mut data = Vec::new();
+        File::open(DISK2).unwrap().read_to_end(&mut data).unwrap();
+        // the second EBR, at LBA 7, is cut off
+        data.truncate(7 * 512);
+        let mut cur = Cursor::new(data);
+        assert!(matches!(
+            MBR::read_from(&mut cur, 512),
+            Err(Error::Io(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof
+        ));
+    }
+
+    #[test]
     fn read_invalid_boot_signature() {
         // MBR
         assert!(matches!(
@@ -2145,6 +2772,41 @@ mod tests {
             mbr.write_into(&mut cur).unwrap_err(),
             Error::InvalidBootFlag
         ));
+        // the table is validated before anything is written: not even the MBR is
+        assert!(cur.get_ref().iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn chunks_match_write_into() {
+        let ss = 512_u32;
+        let mut cur = Cursor::new(vec![0; 64 * ss as usize]);
+        let mut mbr = MBR::new_from(&mut cur, ss, [0x12, 0x34, 0x56, 0x78]).unwrap();
+        mbr.align = 1;
+        mbr.cylinders = 4;
+        mbr.heads = 2;
+        mbr.sectors = 8;
+        mbr.header.partition_1 = MBRPartitionEntry {
+            boot: BOOT_INACTIVE,
+            first_chs: CHS::empty(),
+            sys: 0x0f,
+            last_chs: CHS::empty(),
+            starting_lba: 4,
+            sectors: 60,
+        };
+        for (n, sys) in [(4, 0x83), (10, 0x07), (16, 0x0c)] {
+            mbr.push(sys, n, 6).unwrap();
+        }
+
+        let mut chunked = mbr.clone();
+        let mut disk = vec![0; 64 * ss as usize];
+        for chunk in chunked.chunks().unwrap() {
+            let start = chunk.lba as usize * ss as usize;
+            disk[start..start + 512].copy_from_slice(&chunk.data);
+        }
+        mbr.write_into(&mut cur).unwrap();
+        assert_eq!(cur.into_inner(), disk);
+        // both update the CHS addresses the same way
+        assert_eq!(chunked, mbr);
     }
 
     #[test]
@@ -2450,17 +3112,14 @@ mod tests {
         mbr.write_into(&mut cur).unwrap();
         assert_eq!(cur.into_inner(), first);
     }
-}
 
-#[cfg(doctest)]
-mod test_readme {
-    // for Rust < 1.54
-    // https://blog.guillaume-gomez.fr/articles/2021-08-03+Improvements+for+%23%5Bdoc%5D+attributes+in+Rust
-    macro_rules! check_doc {
-        ($x:expr) => {
-            #[doc = $x]
-            extern "C" {}
-        };
+    #[test]
+    #[should_panic(expected = "the sector size must be at least 512 bytes")]
+    fn write_into_with_a_sector_size_changed_after_construction() {
+        let ss = 512_u32;
+        let mut cur = Cursor::new(vec![0; 64 * ss as usize]);
+        let mut mbr = MBR::new_from(&mut cur, ss, [0xff; 4]).unwrap();
+        mbr.sector_size = 256;
+        mbr.write_into(&mut cur).unwrap();
     }
-    check_doc!(include_str!("../README.md"));
 }

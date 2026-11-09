@@ -4,14 +4,27 @@
 
 Breaking changes:
 
-- Remove the `bincode`, `serde`, `serde-big-array` and `bitvec` dependencies; `thiserror` is the only dependency left (#40)
+- Remove the `bincode`, `serde`, `serde-big-array` and `bitvec` dependencies (#40)
 - `MBRHeader`, `MBRPartitionEntry` and `CHS` no longer implement serde's `Serialize`/`Deserialize`. Use the new `from_bytes`/`to_bytes` methods to encode them in memory (#40)
 - Remove `Error::Deserialize` and `Error::Serialize` (#40)
 - A truncated boot record now returns `Error::Io` with `UnexpectedEof` (#40)
 - `MBR::read_from` only treats the first EBR as missing when its signature is invalid; I/O errors and invalid entries there are now returned instead of being ignored (#40)
+- New default `std` feature: builds with `default-features = false` must enable it to keep the `std::io` integration (#41)
+- `Error::Io` only exists with the `std` feature (#41)
+- `MBR::write_into` validates the whole partition table before writing anything: an invalid logical partition no longer leaves the MBR written without its EBRs (#41)
+- The sector size must be at least 512, the size of a boot record: `MBR::new`, `MBR::reader`, `MBR::new_from`, `MBR::read_from`, `MBR::update_from` and `MBR::write_into` panic otherwise. A sector size of 0 used to panic with a division by zero, and a sector size below 512 mis-addressed the boot records (#41)
+
+Changed:
+
+- Remove the `thiserror` dependency: mbrman has no dependencies left. `Error` keeps the same variants and messages (#41)
 
 Added:
 
+- `no_std` and async support, with no I/O trait to implement: mbrman decodes and encodes boot records and the caller does the I/O. The `MBR` type needs the `alloc` feature (#41)
+- `MBR::new` and `MBR::reader`, which take the disk size in bytes, and `MBRReader`, which asks for each boot record to read and builds the `MBR` (#41)
+- `MBR::chunks`, which validates the partition table and returns each boot record to write with its LBA (#41)
+- `MBRHeader::ebr_walk`, which walks the EBR chain one logical partition at a time, without allocating (#41)
+- `Error::OutOfSequence`, returned when a reader is fed or finished out of sequence (#41)
 - `MBRHeader::from_bytes`/`to_bytes` to decode and encode a 512-byte MBR sector, with validation (#40)
 - `MBRPartitionEntry::from_bytes`/`to_bytes` and `CHS::from_bytes`/`to_bytes` to decode and encode raw entries and CHS addresses (#40)
 
@@ -19,6 +32,8 @@ Fixed:
 
 - `MBR::write_into` wrote EBRs located more than 4 GiB into the disk at the wrong offset (#40)
 - `MBR::read_from` panicked (debug) or returned a wrong LBA (release) on EBR entries whose LBA overflows; it now returns `Error::InconsistentEBR` (#40)
+- `MBR::read_from` panicked when every used partition starts at LBA 0; the alignment then falls back to the default (#41)
+- `MBR::write_into` panicked on a logical partition whose `ebr_sectors` or `ebr_last_chs` was unset (only the first one may leave them empty); it now returns `Error::InconsistentEBR` (#41)
 
 ## v0.6.1 (2025-07-07)
 
