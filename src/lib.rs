@@ -54,9 +54,23 @@ fn write_boot_record<W: Write + Seek + ?Sized>(
 }
 
 /// Convert a disk size in bytes to sectors, saturating at `u32::MAX`.
+///
+/// # Panics
+/// The sector size must be at least 512 bytes: a boot record is 512 bytes and does not fit
+/// in a smaller sector.
 #[cfg(feature = "alloc")]
 fn disk_size_in_sectors(disk_size: u64, sector_size: u32) -> u32 {
+    check_sector_size(sector_size);
     u32::try_from(disk_size / u64::from(sector_size)).unwrap_or(u32::MAX)
+}
+
+/// Check that a boot record (512 bytes) fits in one sector of this size.
+#[cfg(feature = "alloc")]
+fn check_sector_size(sector_size: u32) {
+    assert!(
+        sector_size >= 512,
+        "the sector size must be at least 512 bytes, got {sector_size}"
+    );
 }
 
 /// An error
@@ -170,10 +184,15 @@ impl From<std::io::Error> for Error {
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MBR {
-    /// Sector size of the disk.
+    /// Sector size of the disk, in bytes.
     ///
     /// You should not change this, otherwise the starting locations of your partitions will be
     /// different in bytes.
+    ///
+    /// # Panics
+    /// The value must be at least 512, the size of a boot record: `MBR::new`, `MBR::reader`,
+    /// `MBR::new_from`, `MBR::read_from`, `MBR::update_from` and `MBR::write_into` panic
+    /// otherwise.
     pub sector_size: u32,
     /// MBR partition header (disk GUID, first/last usable LBA, etc...)
     pub header: MBRHeader,
@@ -279,6 +298,9 @@ impl MBR {
     ///
     /// With `std`, `MBR::new_from` reads the disk size from the disk.
     ///
+    /// # Panics
+    /// The sector size must be at least 512, the size of a boot record.
+    ///
     /// # Examples
     /// Basic usage:
     /// ```
@@ -304,6 +326,9 @@ impl MBR {
     /// returned reader asks for the boot records to read one at a time.
     ///
     /// With `std`, `MBR::read_from` does the I/O for you. See [`MBRReader`] for an example.
+    ///
+    /// # Panics
+    /// The sector size must be at least 512, the size of a boot record.
     pub fn reader(sector_size: u32, disk_size_bytes: u64) -> MBRReader {
         MBRReader {
             sector_size,
@@ -855,6 +880,9 @@ impl MBR {
 impl MBR {
     /// Make a new MBR
     ///
+    /// # Panics
+    /// The sector size must be at least 512, the size of a boot record.
+    ///
     /// # Examples
     /// Basic usage:
     /// ```
@@ -877,6 +905,9 @@ impl MBR {
     }
 
     /// Read the MBR on a reader.
+    ///
+    /// # Panics
+    /// The sector size must be at least 512, the size of a boot record.
     ///
     /// # Examples
     /// Basic usage:
@@ -902,6 +933,9 @@ impl MBR {
 
     /// Updates the header to match the specifications of the seeker given in argument.
     /// `disk_size` will be updated after this operation.
+    ///
+    /// # Panics
+    /// Panics if `sector_size` was changed to less than 512 after construction.
     pub fn update_from<S>(&mut self, seeker: &mut S) -> Result<()>
     where
         S: Seek + ?Sized,
@@ -915,6 +949,10 @@ impl MBR {
     /// geometry has been set. See `check_geometry`.
     ///
     /// Nothing is written if the partition table is invalid. See `MBR::chunks`.
+    ///
+    /// # Panics
+    /// Panics if `sector_size` was changed to less than 512 after construction: every boot
+    /// record would be written at an overlapping offset.
     ///
     /// # Examples
     /// Basic usage:
@@ -935,6 +973,9 @@ impl MBR {
     where
         W: Write + Seek + ?Sized,
     {
+        // guard against a sector size changed after construction: every record would be
+        // written at an overlapping offset
+        check_sector_size(self.sector_size);
         let sector_size = u64::from(self.sector_size);
         for chunk in self.chunks()? {
             write_boot_record(writer, u64::from(chunk.lba) * sector_size, &chunk.data)?;
@@ -2086,6 +2127,20 @@ mod core_tests {
         assert_eq!(read.header, mbr.header);
         assert_eq!(read.logical_partitions, mbr.logical_partitions);
     }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    #[should_panic(expected = "the sector size must be at least 512 bytes")]
+    fn mbr_new_with_a_sector_size_smaller_than_a_boot_record() {
+        let _ = MBR::new(256, 1024, [0xff; 4]);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    #[should_panic(expected = "the sector size must be at least 512 bytes")]
+    fn mbr_reader_with_a_zero_sector_size() {
+        let _ = MBR::reader(0, 1024);
+    }
 }
 
 #[cfg(all(test, feature = "std"))]
@@ -3049,5 +3104,15 @@ mod tests {
         let mut cur = Cursor::new(vec![0; 64 * ss as usize]);
         mbr.write_into(&mut cur).unwrap();
         assert_eq!(cur.into_inner(), first);
+    }
+
+    #[test]
+    #[should_panic(expected = "the sector size must be at least 512 bytes")]
+    fn write_into_with_a_sector_size_changed_after_construction() {
+        let ss = 512_u32;
+        let mut cur = Cursor::new(vec![0; 64 * ss as usize]);
+        let mut mbr = MBR::new_from(&mut cur, ss, [0xff; 4]).unwrap();
+        mbr.sector_size = 256;
+        mbr.write_into(&mut cur).unwrap();
     }
 }

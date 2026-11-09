@@ -16,6 +16,7 @@ Breaking changes:
 Changed:
 
 - Remove the `thiserror` dependency: mbrman has no dependencies left. `Error` keeps the same variants and messages (#41)
+- The sector size must be at least 512, the size of a boot record: `MBR::new`, `MBR::reader`, `MBR::new_from`, `MBR::read_from`, `MBR::update_from` and `MBR::write_into` panic otherwise. A sector size of 0 used to panic with a division by zero, and a sector size below 512 mis-addressed the boot records (#41)
 
 Added:
 

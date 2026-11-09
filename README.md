@@ -56,7 +56,9 @@ Without `std`, the I/O errors stay yours: mbrman only returns its own `Error`.
 ### Boot records and sector size
 
 A boot record, the MBR at LBA 0 or an EBR, is 512 bytes whatever the sector size of the disk:
-512 belongs to the on-disk format, not to the device. The `sector_size` of `MBR::new` and
+512 belongs to the on-disk format, not to the device. A sector must therefore be at least 512
+bytes, or a boot record would not fit in it: the constructors panic on a smaller sector size.
+The `sector_size` of `MBR::new` and
 `MBR::reader` only says how many bytes a sector has, so that an LBA can be turned into a byte
 offset. On a disk with larger sectors, read the sector that contains the record and take its
 first 512 bytes; to write, update those 512 bytes inside the sector and write the sector back.
