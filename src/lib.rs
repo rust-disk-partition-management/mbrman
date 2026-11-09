@@ -23,8 +23,6 @@ const MAX_ALIGN: u32 = 16384;
 #[cfg(feature = "alloc")]
 const FIRST_USABLE_LBA: u32 = 1;
 const BOOT_SIGNATURE: [u8; 2] = [0x55, 0xaa];
-/// Size in bytes of an MBR or EBR sector on disk.
-const BOOT_RECORD_SIZE: usize = 512;
 
 /// Boot flag for a bootable partition
 pub const BOOT_ACTIVE: u8 = 0x80;
@@ -36,11 +34,8 @@ pub type Result<T> = core::result::Result<T, Error>;
 
 /// Read exactly one boot record (MBR or EBR sector) at byte `offset`.
 #[cfg(feature = "std")]
-fn read_boot_record<R: Read + Seek + ?Sized>(
-    reader: &mut R,
-    offset: u64,
-) -> Result<[u8; BOOT_RECORD_SIZE]> {
-    let mut buf = [0; BOOT_RECORD_SIZE];
+fn read_boot_record<R: Read + Seek + ?Sized>(reader: &mut R, offset: u64) -> Result<[u8; 512]> {
+    let mut buf = [0; 512];
     reader.seek(SeekFrom::Start(offset))?;
     reader.read_exact(&mut buf)?;
     Ok(buf)
@@ -51,7 +46,7 @@ fn read_boot_record<R: Read + Seek + ?Sized>(
 fn write_boot_record<W: Write + Seek + ?Sized>(
     writer: &mut W,
     offset: u64,
-    data: &[u8; BOOT_RECORD_SIZE],
+    data: &[u8; 512],
 ) -> Result<()> {
     writer.seek(SeekFrom::Start(offset))?;
     writer.write_all(data)?;
@@ -62,11 +57,6 @@ fn write_boot_record<W: Write + Seek + ?Sized>(
 #[cfg(feature = "alloc")]
 fn disk_size_in_sectors(disk_size: u64, sector_size: u32) -> u32 {
     u32::try_from(disk_size / u64::from(sector_size)).unwrap_or(u32::MAX)
-}
-
-/// Copy `N` bytes starting at `offset` into an array.
-fn chunk<const N: usize>(bytes: &[u8], offset: usize) -> [u8; N] {
-    bytes[offset..offset + N].try_into().unwrap()
 }
 
 /// An error
@@ -1108,15 +1098,23 @@ impl MBRHeader {
 
     /// Decode and validate a MBR header from the 512 bytes of the first sector.
     pub fn from_bytes(bytes: &[u8; 512]) -> Result<MBRHeader> {
+        let bootstrap_code: [u8; 440] = bytes[..440].try_into().unwrap();
+        let disk_signature: [u8; 4] = bytes[440..444].try_into().unwrap();
+        let copy_protected: [u8; 2] = bytes[444..446].try_into().unwrap();
+        let partition_1: &[u8; 16] = bytes[446..462].try_into().unwrap();
+        let partition_2: &[u8; 16] = bytes[462..478].try_into().unwrap();
+        let partition_3: &[u8; 16] = bytes[478..494].try_into().unwrap();
+        let partition_4: &[u8; 16] = bytes[494..510].try_into().unwrap();
+        let boot_signature: [u8; 2] = bytes[510..].try_into().unwrap();
         let header = MBRHeader {
-            bootstrap_code: chunk(bytes, 0),
-            disk_signature: chunk(bytes, 440),
-            copy_protected: chunk(bytes, 444),
-            partition_1: MBRPartitionEntry::from_bytes(&chunk(bytes, 446)),
-            partition_2: MBRPartitionEntry::from_bytes(&chunk(bytes, 462)),
-            partition_3: MBRPartitionEntry::from_bytes(&chunk(bytes, 478)),
-            partition_4: MBRPartitionEntry::from_bytes(&chunk(bytes, 494)),
-            boot_signature: chunk(bytes, 510),
+            bootstrap_code,
+            disk_signature,
+            copy_protected,
+            partition_1: MBRPartitionEntry::from_bytes(partition_1),
+            partition_2: MBRPartitionEntry::from_bytes(partition_2),
+            partition_3: MBRPartitionEntry::from_bytes(partition_3),
+            partition_4: MBRPartitionEntry::from_bytes(partition_4),
+            boot_signature,
         };
         header.check()?;
         Ok(header)
@@ -1125,7 +1123,7 @@ impl MBRHeader {
     /// Validate the MBR header and encode it as the 512 bytes of the first sector.
     pub fn to_bytes(&self) -> Result<[u8; 512]> {
         self.check()?;
-        let mut bytes = [0; BOOT_RECORD_SIZE];
+        let mut bytes = [0; 512];
         bytes[..440].copy_from_slice(&self.bootstrap_code);
         bytes[440..444].copy_from_slice(&self.disk_signature);
         bytes[444..446].copy_from_slice(&self.copy_protected);
@@ -1201,22 +1199,28 @@ struct EBRHeader {
 }
 
 impl EBRHeader {
-    fn from_bytes(bytes: &[u8; BOOT_RECORD_SIZE]) -> Result<EBRHeader> {
+    fn from_bytes(bytes: &[u8; 512]) -> Result<EBRHeader> {
+        let bootstrap_code: [u8; 446] = bytes[..446].try_into().unwrap();
+        let partition_1: &[u8; 16] = bytes[446..462].try_into().unwrap();
+        let partition_2: &[u8; 16] = bytes[462..478].try_into().unwrap();
+        let _unused_partition_3: [u8; 16] = bytes[478..494].try_into().unwrap();
+        let _unused_partition_4: [u8; 16] = bytes[494..510].try_into().unwrap();
+        let boot_signature: [u8; 2] = bytes[510..].try_into().unwrap();
         let header = EBRHeader {
-            bootstrap_code: chunk(bytes, 0),
-            partition_1: MBRPartitionEntry::from_bytes(&chunk(bytes, 446)),
-            partition_2: MBRPartitionEntry::from_bytes(&chunk(bytes, 462)),
-            _unused_partition_3: chunk(bytes, 478),
-            _unused_partition_4: chunk(bytes, 494),
-            boot_signature: chunk(bytes, 510),
+            bootstrap_code,
+            partition_1: MBRPartitionEntry::from_bytes(partition_1),
+            partition_2: MBRPartitionEntry::from_bytes(partition_2),
+            _unused_partition_3,
+            _unused_partition_4,
+            boot_signature,
         };
         header.check()?;
         Ok(header)
     }
 
     #[cfg(feature = "alloc")]
-    fn to_bytes(&self) -> [u8; BOOT_RECORD_SIZE] {
-        let mut bytes = [0; BOOT_RECORD_SIZE];
+    fn to_bytes(&self) -> [u8; 512] {
+        let mut bytes = [0; 512];
         bytes[..446].copy_from_slice(&self.bootstrap_code);
         bytes[446..462].copy_from_slice(&self.partition_1.to_bytes());
         bytes[462..478].copy_from_slice(&self.partition_2.to_bytes());
@@ -1260,13 +1264,17 @@ pub struct MBRPartitionEntry {
 impl MBRPartitionEntry {
     /// Decode a partition entry from its 16 on-disk bytes. No validation is done.
     pub fn from_bytes(bytes: &[u8; 16]) -> MBRPartitionEntry {
+        let first_chs: &[u8; 3] = bytes[1..4].try_into().unwrap();
+        let last_chs: &[u8; 3] = bytes[5..8].try_into().unwrap();
+        let starting_lba: [u8; 4] = bytes[8..12].try_into().unwrap();
+        let sectors: [u8; 4] = bytes[12..16].try_into().unwrap();
         MBRPartitionEntry {
             boot: bytes[0],
-            first_chs: CHS::from_bytes(&chunk(bytes, 1)),
+            first_chs: CHS::from_bytes(first_chs),
             sys: bytes[4],
-            last_chs: CHS::from_bytes(&chunk(bytes, 5)),
-            starting_lba: u32::from_le_bytes(chunk(bytes, 8)),
-            sectors: u32::from_le_bytes(chunk(bytes, 12)),
+            last_chs: CHS::from_bytes(last_chs),
+            starting_lba: u32::from_le_bytes(starting_lba),
+            sectors: u32::from_le_bytes(sectors),
         }
     }
 
@@ -1468,7 +1476,7 @@ impl EBRWalk {
     fn decode(
         &mut self,
         extended: &MBRPartitionEntry,
-        sector: &[u8; BOOT_RECORD_SIZE],
+        sector: &[u8; 512],
     ) -> Result<Option<LogicalPartition>> {
         // NOTE: The number of sectors is an index field; thus, the zero
         //       value is invalid, reserved and must not be used in normal
@@ -1622,7 +1630,7 @@ pub struct Chunk {
 pub struct Chunks<'a> {
     mbr: &'a MBR,
     /// The MBR, until it is returned
-    header: Option<[u8; BOOT_RECORD_SIZE]>,
+    header: Option<[u8; 512]>,
     /// The extended partition, `None` if there are no EBRs to write
     extended: Option<MBRPartitionEntry>,
     /// The index of the next logical partition
@@ -1823,9 +1831,9 @@ mod core_tests {
     const DISK2: &[u8] = include_bytes!("../tests/fixtures/disk2.img");
 
     /// The boot record at the start of sector `lba` of `disk`.
-    fn sector(disk: &[u8], lba: u32) -> &[u8; BOOT_RECORD_SIZE] {
-        let start = lba as usize * BOOT_RECORD_SIZE;
-        disk[start..start + BOOT_RECORD_SIZE].try_into().unwrap()
+    fn sector(disk: &[u8], lba: u32) -> &[u8; 512] {
+        let start = lba as usize * 512;
+        disk[start..start + 512].try_into().unwrap()
     }
 
     #[test]
@@ -1912,7 +1920,7 @@ mod core_tests {
             ..MBRPartitionEntry::empty()
         };
         // an EBR whose next link points past u32::MAX
-        let mut ebr = [0; BOOT_RECORD_SIZE];
+        let mut ebr = [0; 512];
         ebr[446 + 4] = 0x83;
         ebr[462 + 4] = 0x0f;
         ebr[462 + 8..462 + 12].copy_from_slice(&5_u32.to_le_bytes());
@@ -2031,8 +2039,8 @@ mod core_tests {
         let mut lbas = [0; 3];
         let mut chunks = mbr.chunks().unwrap();
         for (chunk, lba) in chunks.by_ref().zip(&mut lbas) {
-            let start = chunk.lba as usize * BOOT_RECORD_SIZE;
-            disk[start..start + BOOT_RECORD_SIZE].copy_from_slice(&chunk.data);
+            let start = chunk.lba as usize * 512;
+            disk[start..start + 512].copy_from_slice(&chunk.data);
             *lba = chunk.lba;
         }
         assert!(chunks.next().is_none());
