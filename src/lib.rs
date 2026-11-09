@@ -364,6 +364,13 @@ impl MBR {
     /// Nothing is returned if the partition table is invalid, so a disk is never left with
     /// half of a partition table. With `std`, `MBR::write_into` does the I/O for you.
     ///
+    /// # Remarks
+    ///
+    /// The MBR itself may have been updated even when an error is returned: the EBR address of
+    /// the first logical partition, its EBR size and last EBR CHS address, and the CHS addresses
+    /// of the logical partitions when a valid geometry is set. These values are rewritten on every
+    /// call, so call `chunks` again once the table is fixed.
+    ///
     /// # Examples
     /// Basic usage:
     /// ```
