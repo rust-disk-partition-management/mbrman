@@ -12,11 +12,11 @@ Breaking changes:
 - New default `std` feature: builds with `default-features = false` must enable it to keep the `std::io` integration (#41)
 - `Error::Io` only exists with the `std` feature (#41)
 - `MBR::write_into` validates the whole partition table before writing anything: an invalid logical partition no longer leaves the MBR written without its EBRs (#41)
+- The sector size must be at least 512, the size of a boot record: `MBR::new`, `MBR::reader`, `MBR::new_from`, `MBR::read_from`, `MBR::update_from` and `MBR::write_into` panic otherwise. A sector size of 0 used to panic with a division by zero, and a sector size below 512 mis-addressed the boot records (#41)
 
 Changed:
 
 - Remove the `thiserror` dependency: mbrman has no dependencies left. `Error` keeps the same variants and messages (#41)
-- The sector size must be at least 512, the size of a boot record: `MBR::new`, `MBR::reader`, `MBR::new_from`, `MBR::read_from`, `MBR::update_from` and `MBR::write_into` panic otherwise. A sector size of 0 used to panic with a division by zero, and a sector size below 512 mis-addressed the boot records (#41)
 
 Added:
 

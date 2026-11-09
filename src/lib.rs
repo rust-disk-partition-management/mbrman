@@ -1,4 +1,11 @@
-#![doc = include_str!("../README.md")]
+#![cfg_attr(feature = "std", doc = include_str!("../README.md"))]
+#![cfg_attr(
+    not(feature = "std"),
+    doc = "A library for reading and managing MBR partition tables.\n\n\
+           Without the `std` feature, this page does not include the README: see \
+           <https://docs.rs/mbrman> for the full documentation, including how to do the I/O \
+           yourself and how to use the reader and writer in async code."
+)]
 #![no_std]
 #![deny(missing_docs)]
 
