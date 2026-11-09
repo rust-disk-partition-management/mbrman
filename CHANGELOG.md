@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.7.0 (2026-11-09)
 
 Breaking changes:
 
@@ -10,7 +10,7 @@ Breaking changes:
 - A truncated boot record now returns `Error::Io` with `UnexpectedEof` (#40)
 - `MBR::read_from` only treats the first EBR as missing when its signature is invalid; I/O errors and invalid entries there are now returned instead of being ignored (#40)
 - New default `std` feature: builds with `default-features = false` must enable it to keep the `std::io` integration (#41)
-- `Error::Io` only exists with the `std` feature (#41)
+- `Error::Io`, `MBR::new_from`, `MBR::update_from`, `MBR::read_from`, `MBR::write_into`, `MBRHeader::read_from` and `MBRHeader::write_into` only exist with the `std` feature (#41)
 - `MBR::write_into` validates the whole partition table before writing anything: an invalid logical partition no longer leaves the MBR written without its EBRs (#41)
 - The sector size must be at least 512, the size of a boot record: `MBR::new`, `MBR::reader`, `MBR::new_from`, `MBR::read_from`, `MBR::update_from` and `MBR::write_into` panic otherwise. A sector size of 0 used to panic with a division by zero, and a sector size below 512 mis-addressed the boot records (#41)
 
