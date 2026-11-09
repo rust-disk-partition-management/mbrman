@@ -421,9 +421,9 @@ impl MBR {
                 boot: BOOT_INACTIVE,
                 first_chs: next.ebr_first_chs,
                 sys: extended.sys,
-                last_chs: next.ebr_last_chs.unwrap(),
+                last_chs: next.ebr_last_chs.ok_or(Error::InconsistentEBR)?,
                 starting_lba: next.absolute_ebr_lba.saturating_sub(extended.starting_lba),
-                sectors: next.ebr_sectors.unwrap(),
+                sectors: next.ebr_sectors.ok_or(Error::InconsistentEBR)?,
             },
             None => MBRPartitionEntry::empty(),
         };
@@ -2019,6 +2019,30 @@ mod core_tests {
         // the second logical partition is invalid: the MBR must not be written either
         mbr.logical_partitions[1].partition.boot = 0x42;
         assert!(matches!(mbr.chunks(), Err(Error::InvalidBootFlag)));
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn chunks_of_logical_partition_missing_its_ebr_fields() {
+        // the EBR fields of a logical partition are public, so a table built by hand can have
+        // them unset on any partition but the first one
+        for unset in [
+            (|l: &mut LogicalPartition| l.ebr_sectors = None) as fn(&mut LogicalPartition),
+            |l: &mut LogicalPartition| l.ebr_last_chs = None,
+        ] {
+            let mut mbr = MBR::new(512, 64 * 512, [0xff; 4]);
+            mbr[1] = MBRPartitionEntry {
+                sys: 0x0f,
+                starting_lba: 1,
+                sectors: 63,
+                ..MBRPartitionEntry::empty()
+            };
+            mbr.align = 1;
+            mbr.push(0x83, 1, 10).unwrap();
+            mbr.push(0x83, 12, 10).unwrap();
+            unset(&mut mbr.logical_partitions[1]);
+            assert!(matches!(mbr.chunks(), Err(Error::InconsistentEBR)));
+        }
     }
 
     #[cfg(feature = "alloc")]
