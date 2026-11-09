@@ -426,12 +426,6 @@ fn write_boot_record<W: Write + Seek + ?Sized>(
     Ok(())
 }
 
-/// Return the size of a disk in bytes.
-#[cfg(feature = "std")]
-fn disk_size<S: Seek + ?Sized>(seeker: &mut S) -> Result<u64> {
-    Ok(seeker.seek(SeekFrom::End(0))?)
-}
-
 /// Convert a disk size in bytes to sectors, saturating at `u32::MAX`.
 #[cfg(feature = "alloc")]
 fn disk_size_in_sectors(disk_size: u64, sector_size: u32) -> u32 {
@@ -659,7 +653,7 @@ impl MBR {
         false
     }
 
-    /// Make a new MBR for a disk of `disk_size` bytes, without doing any I/O.
+    /// Make a new MBR for a disk of `disk_size_bytes` bytes, without doing any I/O.
     ///
     /// With `std`, `MBR::new_from` reads the disk size from the disk.
     ///
@@ -671,7 +665,7 @@ impl MBR {
     /// assert_eq!(mbr.disk_size, 100);
     /// # }
     /// ```
-    pub fn new(sector_size: u32, disk_size: u64, disk_signature: [u8; 4]) -> MBR {
+    pub fn new(sector_size: u32, disk_size_bytes: u64, disk_signature: [u8; 4]) -> MBR {
         MBR {
             sector_size,
             header: MBRHeader::new(disk_signature),
@@ -680,18 +674,18 @@ impl MBR {
             cylinders: 0,
             heads: 0,
             sectors: 0,
-            disk_size: disk_size_in_sectors(disk_size, sector_size),
+            disk_size: disk_size_in_sectors(disk_size_bytes, sector_size),
         }
     }
 
-    /// Start reading the MBR of a disk of `disk_size` bytes, without doing any I/O: the
+    /// Start reading the MBR of a disk of `disk_size_bytes` bytes, without doing any I/O: the
     /// returned reader asks for the boot records to read one at a time.
     ///
     /// With `std`, `MBR::read_from` does the I/O for you. See [`MBRReader`] for an example.
-    pub fn reader(sector_size: u32, disk_size: u64) -> MBRReader {
+    pub fn reader(sector_size: u32, disk_size_bytes: u64) -> MBRReader {
         MBRReader {
             sector_size,
-            disk_size: disk_size_in_sectors(disk_size, sector_size),
+            disk_size: disk_size_in_sectors(disk_size_bytes, sector_size),
             table: None,
             logical_partitions: Vec::new(),
         }
@@ -1247,7 +1241,11 @@ impl MBR {
     where
         S: Seek + ?Sized,
     {
-        Ok(MBR::new(sector_size, disk_size(seeker)?, disk_signature))
+        Ok(MBR::new(
+            sector_size,
+            seeker.seek(SeekFrom::End(0))?,
+            disk_signature,
+        ))
     }
 
     /// Read the MBR on a reader.
@@ -1266,7 +1264,7 @@ impl MBR {
     where
         R: Read + Seek + ?Sized,
     {
-        let mut mbr = MBR::reader(sector_size, disk_size(reader)?);
+        let mut mbr = MBR::reader(sector_size, reader.seek(SeekFrom::End(0))?);
         while let Some(lba) = mbr.next_lba()? {
             let offset = u64::from(lba) * u64::from(sector_size);
             mbr.feed(&read_boot_record(reader, offset)?)?;
@@ -1280,7 +1278,7 @@ impl MBR {
     where
         S: Seek + ?Sized,
     {
-        self.disk_size = disk_size_in_sectors(disk_size(seeker)?, self.sector_size);
+        self.disk_size = disk_size_in_sectors(seeker.seek(SeekFrom::End(0))?, self.sector_size);
         Ok(())
     }
 
