@@ -61,6 +61,7 @@ Write a partition table with an extended partition and a logical volume to a blo
 then read it back.
 
 ```rust
+# #[cfg(feature = "alloc")] {
 // a disk in memory, standing in for your block device
 let mut disk = [0_u8; 64 * 512];
 
@@ -94,6 +95,7 @@ while let Some(lba) = reader.next_lba().expect("invalid EBR chain") {
 }
 let read = reader.finish().expect("could not read the partition table");
 assert_eq!(read.logical_partitions, mbr.logical_partitions);
+# }
 ```
 
 ### Without `alloc`
@@ -102,6 +104,7 @@ Read the logical partitions of a disk without allocating. `MBRHeader::to_bytes` 
 the 512 bytes of the MBR, to write at LBA 0.
 
 ```rust
+# #[cfg(feature = "std")] {
 // the bytes of a disk image, standing in for your block device
 let disk = std::fs::read("tests/fixtures/disk2.img").expect("could not read disk");
 let sector = |lba: u32| -> [u8; 512] {
@@ -120,14 +123,52 @@ while let Some(lba) = walk.next_lba().expect("invalid EBR chain") {
 
 let mbr_bytes = header.to_bytes().expect("could not encode the MBR header");
 assert_eq!(mbr_bytes.len(), 512);
+# }
 ```
 
 ### Async
 
 The same loops work with any async runtime: only the I/O calls change. `dev` is your async
-block device. The crate documentation has a complete example, which runs as a test.
+block device.
 
-```rust,ignore
+```rust
+# #[cfg(feature = "alloc")] {
+use mbrman::MBR;
+
+/// An async block device, standing in for a tokio, embassy or other driver.
+struct Device(Vec<u8>);
+
+impl Device {
+    fn size(&self) -> u64 {
+        self.0.len() as u64
+    }
+
+    async fn read_block(&mut self, lba: u32, buf: &mut [u8; 512]) -> Result<(), Error> {
+        let start = lba as usize * 512;
+        buf.copy_from_slice(self.0.get(start..start + 512).ok_or(Error::Device)?);
+        Ok(())
+    }
+
+    async fn write_block(&mut self, lba: u32, buf: &[u8; 512]) -> Result<(), Error> {
+        let start = lba as usize * 512;
+        self.0.get_mut(start..start + 512).ok_or(Error::Device)?.copy_from_slice(buf);
+        Ok(())
+    }
+}
+
+/// The errors of your application: the device's and mbrman's.
+#[derive(Debug)]
+enum Error {
+    Device,
+    Mbr(mbrman::Error),
+}
+
+impl From<mbrman::Error> for Error {
+    fn from(err: mbrman::Error) -> Error {
+        Error::Mbr(err)
+    }
+}
+
 async fn read_mbr(dev: &mut Device) -> Result<MBR, Error> {
     let mut reader = MBR::reader(512, dev.size());
     let mut buf = [0; 512];
@@ -144,6 +185,28 @@ async fn write_mbr(dev: &mut Device, mbr: &mut MBR) -> Result<(), Error> {
     }
     Ok(())
 }
+
+async fn run() -> Result<(), Error> {
+    let mut dev = Device(vec![0; 64 * 512]);
+    let mut mbr = MBR::new(512, dev.size(), [0xff; 4]);
+    write_mbr(&mut dev, &mut mbr).await?;
+    assert_eq!(read_mbr(&mut dev).await?.header.disk_signature, [0xff; 4]);
+    Ok(())
+}
+
+// use your runtime's executor instead; this one only polls until the future is ready
+# use core::{future::Future, pin::pin, task::{Context, Poll, Waker}};
+# fn block_on<F: Future>(fut: F) -> F::Output {
+#     let mut fut = pin!(fut);
+#     let mut cx = Context::from_waker(Waker::noop());
+#     loop {
+#         if let Poll::Ready(out) = fut.as_mut().poll(&mut cx) {
+#             return out;
+#         }
+#     }
+# }
+block_on(run()).expect("could not write and read the partition table");
+# }
 ```
 
 ## Examples
@@ -153,6 +216,7 @@ async fn write_mbr(dev: &mut Device, mbr: &mut MBR) -> Result<(), Error> {
 Open a disk image, read its MBR and list the partitions in use.
 
 ```rust
+# #[cfg(feature = "std")] {
 let mut f = std::fs::File::open("tests/fixtures/disk1.img")
     .expect("could not open disk");
 let mbr = mbrman::MBR::read_from(&mut f, 512)
@@ -170,6 +234,7 @@ for (i, p) in mbr.iter() {
             p.starting_lba);
     }
 }
+# }
 ```
 
 ### Create and delete a primary partition
@@ -177,6 +242,7 @@ for (i, p) in mbr.iter() {
 Find a free slot and free space, fill the slot with a new partition, then empty it again.
 
 ```rust
+# #[cfg(feature = "std")] {
 let mut f = std::fs::File::open("tests/fixtures/disk1.img")
     .expect("could not open disk");
 let mut mbr = mbrman::MBR::read_from(&mut f, 512)
@@ -201,6 +267,7 @@ mbr[free_partition_number] = mbrman::MBRPartitionEntry {
 mbr[free_partition_number] = mbrman::MBRPartitionEntry::empty();
 
 // NOTE: nothing is written to the disk until you call mbr.write_into()
+# }
 ```
 
 ### Create a new partition table on an empty disk
@@ -208,6 +275,7 @@ mbr[free_partition_number] = mbrman::MBRPartitionEntry::empty();
 Write a fresh MBR to a blank in-memory disk.
 
 ```rust
+# #[cfg(feature = "std")] {
 let ss = 512; // sector size
 let data = vec![0; 100 * ss as usize];
 let mut cur = std::io::Cursor::new(data);
@@ -217,6 +285,7 @@ let mut mbr = mbrman::MBR::new_from(&mut cur, ss as u32, [0xff; 4])
 
 // NOTE: write the changes to the in-memory buffer
 mbr.write_into(&mut cur);
+# }
 ```
 
 ### Add a logical volume
@@ -224,6 +293,7 @@ mbr.write_into(&mut cur);
 A logical volume lives inside an extended partition, so create one first. `push` then places the volume and its EBR for you.
 
 ```rust
+# #[cfg(feature = "std")] {
 let ss = 512; // sector size
 let data = vec![0; 100 * ss as usize];
 let mut cur = std::io::Cursor::new(data);
@@ -251,6 +321,7 @@ mbr.push(0x83, 1, mbr.disk_size - 1)
 
 // NOTE: write the changes to the in-memory buffer
 mbr.write_into(&mut cur);
+# }
 ```
 
 ### Add a logical volume manually
@@ -258,6 +329,7 @@ mbr.write_into(&mut cur);
 Use this only if you need to choose exactly where the EBR and the partition go.
 
 ```rust
+# #[cfg(feature = "std")] {
 let ss = 512; // sector size
 let data = vec![0; 100 * ss as usize];
 let mut cur = std::io::Cursor::new(data);
@@ -302,4 +374,5 @@ mbr.logical_partitions.push(
 
 // NOTE: write the changes to the in-memory buffer
 mbr.write_into(&mut cur);
+# }
 ```
