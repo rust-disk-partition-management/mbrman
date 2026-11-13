@@ -7,6 +7,7 @@ Fixed:
 - `MBR::find_free_sectors` panicked when two boundaries came out equal (debug) or wrapped a gap size around (release), from entries sharing a boundary or a one-sector partition whose first and last sector are the same, and the wrapped size returned spots inside a partition, past the end of the disk and overlapping each other; tables whose entries overlap returned spots inside a partition and overlapping each other in debug too, without panicking. `find_first_place`, `find_last_place`, `find_optimal_place`, `get_maximum_partition_size` and `get_maximum_partition_size_for` then handed those spots to the caller
 - `MBR::find_free_sectors` added `absolute_ebr_lba` to the `starting_lba` of a logical partition, which is already absolute, so the free spots of an extended partition were wrong
 - `MBR::find_free_sectors` and `MBR::find_at_sector` panicked (debug) or wrapped around (release) on partitions ending past `u32::MAX`, such as the protective MBR of a GPT disk of 2 TiB or more. A partition ending past the end of the disk made `find_free_sectors` report free spots past the end of the disk
+- `MBR::get_maximum_partition_size` returned `Ok(0)` when the largest free spot was smaller than the alignment, which is reachable with the default alignment of 2048 on any disk whose size is not a multiple of it: the size rounds down to no sectors, and `find_optimal_place(0)` then placed a partition of no sectors, which `MBR::write_into` accepted
 
 ## v0.7.0 (2026-11-09)
 

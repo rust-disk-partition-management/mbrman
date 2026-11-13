@@ -775,6 +775,9 @@ impl MBR {
     /// Get the maximum size (in sectors) of a partition you could create in the MBR.
     /// This function will automatically align with the alignment defined in the `MBR`.
     ///
+    /// Return `Error::NoSpaceLeft` if no free spot can hold a partition of at least one sector
+    /// once aligned: a free spot smaller than the alignment is not usable, so it is not a size.
+    ///
     /// # Examples:
     /// Basic usage:
     /// ```
@@ -795,10 +798,26 @@ impl MBR {
     /// );
     /// # }
     /// ```
+    /// A disk with a single free sector less than the alignment away from its start has no
+    /// room for a partition:
+    /// ```
+    /// # #[cfg(feature = "std")] {
+    /// // 2049 sectors with the default alignment of 2048: the only free spot is sector 2048
+    /// let mut mbr = mbrman::MBR::new(512, 2049 * 512, [0xff; 4]);
+    /// assert_eq!(mbr.align, 2048);
+    /// assert_eq!(mbr.find_free_sectors(), vec![(2048, 1)]);
+    /// assert!(mbr.get_maximum_partition_size().is_err());
+    /// # }
+    /// ```
     pub fn get_maximum_partition_size(&self) -> Result<u32> {
         self.find_free_sectors()
             .into_iter()
-            .map(|(_, l)| l / self.align * self.align)
+            // a free spot smaller than the alignment rounds down to no sectors at all, which
+            // is not a partition: reporting it hands the caller a size it cannot use
+            .filter_map(|(_, l)| match l / self.align * self.align {
+                0 => None,
+                size => Some(size),
+            })
             .max()
             .ok_or(Error::NoSpaceLeft)
     }
@@ -2701,6 +2720,24 @@ mod tests {
         mbr[2] = mbr[1].clone();
 
         assert_eq!(mbr.find_free_sectors(), vec![(1, 4), (10, 10)]);
+    }
+
+    #[test]
+    fn get_maximum_partition_size_of_a_free_spot_below_the_alignment() {
+        // 2049 sectors with the default alignment of 2048 leaves a single free sector at the
+        // end of the first aligned block: it rounds down to 0, which is not a size to hand
+        // back, and `find_optimal_place(0)` would then place a partition of no sectors
+        let mut mbr = MBR::new(512, 2049 * 512, [0xff; 4]);
+        assert_eq!(mbr.align, 2048);
+        assert_eq!(mbr.find_free_sectors(), vec![(2048, 1)]);
+        assert!(matches!(
+            mbr.get_maximum_partition_size(),
+            Err(Error::NoSpaceLeft)
+        ));
+
+        // with no alignment in the way the same disk does have a usable spot
+        mbr.align = 1;
+        assert!(matches!(mbr.get_maximum_partition_size(), Ok(2048)));
     }
 
     #[test]
