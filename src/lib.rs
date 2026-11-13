@@ -15,7 +15,7 @@ extern crate alloc;
 extern crate std;
 
 #[cfg(feature = "alloc")]
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 use core::fmt;
 #[cfg(feature = "alloc")]
 use core::iter::FusedIterator;
@@ -485,7 +485,11 @@ impl MBR {
     /// Finds the primary partition (ignoring extended partitions) or logical
     /// partition where the given sector resides.
     pub fn find_at_sector(&self, sector: u32) -> Option<usize> {
-        let between = |sector, start, len| sector >= start && sector < start + len;
+        // A partition can end past u32::MAX, so its end has no u32 to compare against:
+        // the protective MBR of a GPT disk of 2 TiB or more does exactly that.
+        let between = |sector: u32, start: u32, len: u32| {
+            sector >= start && start.checked_add(len).is_none_or(|end| sector < end)
+        };
 
         let primary = self
             .header
@@ -566,41 +570,89 @@ impl MBR {
     pub fn find_free_sectors(&self) -> Vec<(u32, u32)> {
         assert!(self.align > 0, "align must be greater than 0");
 
-        let collect_free_sectors = |positions: Vec<u32>| {
-            positions
-                .chunks(2)
-                .map(|x| (x[0] + 1, x[1] - x[0] - 1))
-                .filter(|(_, l)| *l > 0)
-                .map(|(i, l)| (i, l, ((i - 1) / self.align + 1) * self.align - i))
-                .map(|(i, l, s)| (i + s, l.saturating_sub(s)))
-                .filter(|(_, l)| *l > 0)
+        // A partition can claim sectors past the end of the disk, and past u32::MAX: the
+        // protective MBR of a GPT disk of 2 TiB or more does both. Only the sectors a
+        // partition covers inside the disk are taken.
+        let last_sector = self.disk_size.saturating_sub(1);
+        let clamp = |lba: u32| lba.min(last_sector);
+
+        // Whereas the entry of a partition is an inclusive `starting_lba` and `sectors`, here
+        // a partition is `(first, last)`, both inclusive.
+        let occupied = |first: u32, sectors: u32| {
+            let first = clamp(first);
+            (
+                first,
+                clamp(first.saturating_add(sectors).saturating_sub(1)),
+            )
+        };
+
+        // Report the gaps left in `start..end` by the occupied sectors. The occupied ranges
+        // are merged first: two entries can overlap or share a boundary, which MBR does not
+        // forbid, and a gap must never be reported inside a partition. `start` is the first
+        // sector that can be free, `end` the sector after the last one.
+        let find_gaps = |mut used: Vec<(u32, u32)>, start: u32, end: u32| {
+            used.sort_unstable();
+
+            let mut gaps = Vec::new();
+            let mut cursor = start;
+            for (first, last) in used {
+                // an entry with no sector, or one that ends before the cursor, occupies nothing
+                if last < first || last < cursor {
+                    continue;
+                }
+                // the entries are sorted, so this one and all the following are past the range
+                if first >= end {
+                    break;
+                }
+                if first > cursor {
+                    gaps.push((cursor, first));
+                }
+                cursor = last.saturating_add(1);
+                if cursor >= end {
+                    break;
+                }
+            }
+            if cursor < end {
+                gaps.push((cursor, end));
+            }
+
+            // round the start of every gap up to the alignment
+            gaps.into_iter()
+                .filter_map(|(first, end)| {
+                    let aligned = match first % self.align {
+                        0 => first,
+                        rest => first.saturating_add(self.align - rest),
+                    };
+                    (aligned < end).then(|| (aligned, end - aligned))
+                })
                 .collect::<Vec<_>>()
         };
 
-        let mut positions = vec![0];
-        for (_, partition) in self.header.iter().filter(|(_, x)| x.is_used()) {
-            positions.push(partition.starting_lba);
-            positions.push(partition.starting_lba + partition.sectors - 1);
-        }
-        positions.push(self.disk_size);
-        positions.sort_unstable();
-
-        let mut res = collect_free_sectors(positions);
+        let primaries = self
+            .header
+            .iter()
+            .filter(|(_, x)| x.is_used())
+            .map(|(_, x)| occupied(x.starting_lba, x.sectors))
+            .collect::<Vec<_>>();
+        // LBA 0 holds the MBR itself, so it is never free
+        let mut res = find_gaps(primaries, 1.min(self.disk_size), self.disk_size);
 
         if let Some(extended) = self.header.get_extended_partition() {
-            let mut positions = vec![extended.starting_lba];
-            for l in self
+            let logicals = self
                 .logical_partitions
                 .iter()
                 .filter(|x| x.partition.is_used())
-            {
-                let starting_lba = l.absolute_ebr_lba + l.partition.starting_lba;
-                positions.push(starting_lba);
-                positions.push(starting_lba + l.partition.sectors - 1);
-            }
-            positions.push(extended.starting_lba + extended.sectors);
-            positions.sort_unstable();
-            res.extend(collect_free_sectors(positions));
+                // `partition.starting_lba` is absolute, like the one of a primary
+                // partition: `MBR::reader` and `MBR::push` both store it that way
+                .map(|x| occupied(x.partition.starting_lba, x.partition.sectors))
+                .collect::<Vec<_>>();
+            // the first sector of the extended partition holds the first EBR
+            let start = clamp(extended.starting_lba).saturating_add(1);
+            let end = extended
+                .starting_lba
+                .saturating_add(extended.sectors)
+                .min(self.disk_size);
+            res.extend(find_gaps(logicals, start, end));
         }
 
         res
@@ -723,6 +775,9 @@ impl MBR {
     /// Get the maximum size (in sectors) of a partition you could create in the MBR.
     /// This function will automatically align with the alignment defined in the `MBR`.
     ///
+    /// Return `Error::NoSpaceLeft` if no free spot can hold a partition of at least one sector
+    /// once aligned: a free spot smaller than the alignment is not usable, so it is not a size.
+    ///
     /// # Examples:
     /// Basic usage:
     /// ```
@@ -743,10 +798,26 @@ impl MBR {
     /// );
     /// # }
     /// ```
+    /// A disk with a single free sector less than the alignment away from its start has no
+    /// room for a partition:
+    /// ```
+    /// # #[cfg(feature = "std")] {
+    /// // 2049 sectors with the default alignment of 2048: the only free spot is sector 2048
+    /// let mut mbr = mbrman::MBR::new(512, 2049 * 512, [0xff; 4]);
+    /// assert_eq!(mbr.align, 2048);
+    /// assert_eq!(mbr.find_free_sectors(), vec![(2048, 1)]);
+    /// assert!(mbr.get_maximum_partition_size().is_err());
+    /// # }
+    /// ```
     pub fn get_maximum_partition_size(&self) -> Result<u32> {
         self.find_free_sectors()
             .into_iter()
-            .map(|(_, l)| l / self.align * self.align)
+            // a free spot smaller than the alignment rounds down to no sectors at all, which
+            // is not a partition: reporting it hands the caller a size it cannot use
+            .filter_map(|(_, l)| match l / self.align * self.align {
+                0 => None,
+                size => Some(size),
+            })
             .max()
             .ok_or(Error::NoSpaceLeft)
     }
@@ -2565,7 +2636,8 @@ mod tests {
                 first_chs: CHS::empty(),
                 sys: 0x83,
                 last_chs: CHS::empty(),
-                starting_lba: 2,
+                // absolute, like the `starting_lba` of a primary partition
+                starting_lba: 7,
                 sectors: 1,
             },
             absolute_ebr_lba: 5,
@@ -2575,6 +2647,112 @@ mod tests {
         });
 
         assert_eq!(mbr.find_free_sectors(), vec![(2, 3), (6, 1), (8, 2)]);
+    }
+
+    #[test]
+    fn find_free_sectors_of_disk2() {
+        // a real disk with an extended partition and five logical volumes: the free spots
+        // used to overflow in the subtraction of the gaps
+        let mbr = MBR::read_from(&mut File::open(DISK2).unwrap(), 512).unwrap();
+        assert_eq!(
+            mbr.find_free_sectors(),
+            vec![(4, 1), (7, 1), (10, 1), (14, 1), (16, 1), (18, 2)]
+        );
+    }
+
+    #[test]
+    fn find_free_sectors_of_a_protective_mbr() {
+        // a GPT disk of 2 TiB: the protective MBR claims LBA 1 to the last LBA of the
+        // 32-bit LBA space, so the end of the partition overflows u32
+        let mut boot_record = [0_u8; 512];
+        boot_record[446 + 4] = 0xee;
+        boot_record[446 + 8..446 + 12].copy_from_slice(&1_u32.to_le_bytes());
+        boot_record[446 + 12..446 + 16].copy_from_slice(&u32::MAX.to_le_bytes());
+        boot_record[510] = 0x55;
+        boot_record[511] = 0xaa;
+
+        let mut reader = MBR::reader(512, 2 << 40);
+        reader.feed(&boot_record).unwrap();
+        let mbr = reader.finish().unwrap();
+
+        // the protective MBR covers the whole disk: nothing is free, and nothing overflows
+        assert_eq!(mbr.find_free_sectors(), vec![]);
+        assert!(matches!(
+            mbr.get_maximum_partition_size(),
+            Err(Error::NoSpaceLeft)
+        ));
+    }
+
+    #[test]
+    fn find_free_sectors_with_duplicated_starting_lba() {
+        // two entries claiming the same starting LBA make the sorted list contain the same
+        // value twice, which used to underflow the size of the gap
+        let mut mbr = MBR::new(512, 10 * 512, [0xff; 4]);
+        mbr.align = 1;
+        for i in 1..=2 {
+            mbr[i] = MBRPartitionEntry {
+                boot: BOOT_INACTIVE,
+                first_chs: CHS::empty(),
+                sys: 0x83,
+                last_chs: CHS::empty(),
+                starting_lba: 1,
+                sectors: 1,
+            };
+        }
+
+        assert_eq!(mbr.find_free_sectors(), vec![(2, 8)]);
+    }
+
+    #[test]
+    fn find_free_sectors_with_overlapping_partitions() {
+        // two entries can overlap, or share a boundary, which MBR does not forbid: no free
+        // spot may then be reported inside either of them
+        let mut mbr = MBR::new(512, 20 * 512, [0xff; 4]);
+        mbr.align = 1;
+        mbr[1] = MBRPartitionEntry {
+            boot: BOOT_INACTIVE,
+            first_chs: CHS::empty(),
+            sys: 0x83,
+            last_chs: CHS::empty(),
+            starting_lba: 5,
+            sectors: 5,
+        };
+        mbr[2] = mbr[1].clone();
+
+        assert_eq!(mbr.find_free_sectors(), vec![(1, 4), (10, 10)]);
+    }
+
+    #[test]
+    fn get_maximum_partition_size_of_a_free_spot_below_the_alignment() {
+        // 2049 sectors with the default alignment of 2048 leaves a single free sector at the
+        // end of the first aligned block: it rounds down to 0, which is not a size to hand
+        // back, and `find_optimal_place(0)` would then place a partition of no sectors
+        let mut mbr = MBR::new(512, 2049 * 512, [0xff; 4]);
+        assert_eq!(mbr.align, 2048);
+        assert_eq!(mbr.find_free_sectors(), vec![(2048, 1)]);
+        assert!(matches!(
+            mbr.get_maximum_partition_size(),
+            Err(Error::NoSpaceLeft)
+        ));
+
+        // with no alignment in the way the same disk does have a usable spot
+        mbr.align = 1;
+        assert!(matches!(mbr.get_maximum_partition_size(), Ok(2048)));
+    }
+
+    #[test]
+    fn find_at_sector_of_a_partition_ending_past_u32_max() {
+        let mut mbr = MBR::new(512, 10 * 512, [0xff; 4]);
+        mbr[1] = MBRPartitionEntry {
+            boot: BOOT_INACTIVE,
+            first_chs: CHS::empty(),
+            sys: 0x83,
+            last_chs: CHS::empty(),
+            starting_lba: 0xffff_fff0,
+            sectors: 0x100,
+        };
+
+        assert_eq!(mbr.find_at_sector(0xffff_fff8), Some(1));
     }
 
     #[test]
